@@ -1,0 +1,12 @@
+# Abaikan file konfigurasi lokal
+.env
+
+# Abaikan dependensi Node.js
+/node_modules
+
+# Abaikan file log
+*.log
+
+# Abaikan file sistem operasi
+.DS_Store
+Thumbs.db
