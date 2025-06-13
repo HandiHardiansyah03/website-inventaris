@@ -103,7 +103,6 @@ hr {
     justify-content: space-between;
     align-items: center;
 }
-
 .content-area { padding: 30px; }
 body.sidebar-minimized .sidebar { width: var(--sidebar-width-mini); }
 body.sidebar-minimized .main-content { margin-left: var(--sidebar-width-mini); }
@@ -112,7 +111,6 @@ body.sidebar-minimized .sidebar .user-profile,
 body.sidebar-minimized .sidebar .nav-heading,
 body.sidebar-minimized .sidebar .nav-link .menu-text { display: none; }
 body.sidebar-minimized .sidebar .nav-link { justify-content: center; }
-
 @media (max-width: 992px) {
     body:not(.sidebar-minimized) { --sidebar-width: 80px; }
     body:not(.sidebar-minimized) .sidebar .sidebar-header .app-title,
@@ -122,7 +120,6 @@ body.sidebar-minimized .sidebar .nav-link { justify-content: center; }
     body:not(.sidebar-minimized) .sidebar .nav-link { justify-content: center; }
     body:not(.sidebar-minimized) .main-content { margin-left: var(--sidebar-width-mini); }
 }
-
 .loader {
     border: 8px solid #f3f3f3;
     border-radius: 50%;
@@ -131,8 +128,11 @@ body.sidebar-minimized .sidebar .nav-link { justify-content: center; }
     animation: spin 2s linear infinite;
 }
 @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        
 .scrollable-container {
     max-height: 280px;
     overflow-y: auto;
+}
+.date-picker-container {
+    max-width: 400px;
+    margin-bottom: 20px;
 }
