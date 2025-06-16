@@ -1,6 +1,6 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, collection, query, orderBy, onSnapshot, doc, getDoc, getDocs, addDoc, updateDoc, deleteDoc, writeBatch, serverTimestamp, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, query, orderBy, onSnapshot, doc, getDoc, getDocs, addDoc, updateDoc, deleteDoc, writeBatch, serverTimestamp, where, limit } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
     apiKey: "AIzaSyBS1mtdu6GkLG4X7yIv8e5BxmR7_rlMNLQ",
@@ -16,643 +16,1400 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
-onAuthStateChanged(auth, user => {
-    if (user) {
+let currentPage = 'dashboard';
+let currentCollectionName = 'dashboard';
+let user = null;
+const itemForm = document.getElementById('itemForm');
+const itemModal = new bootstrap.Modal(document.getElementById('itemModal'));
+const confirmActionModal = new bootstrap.Modal(document.getElementById('confirmActionModal'));
+const { jsPDF } = window.jspdf;
+
+onAuthStateChanged(auth, (currentUser) => {
+    if (currentUser) {
+        user = currentUser;
         document.getElementById('app-loader').classList.add('d-none');
         document.getElementById('main-app').classList.remove('d-none');
-        initializeAppLogic(user);
+        initializeAppLogic();
     } else {
-        window.location.href = new URL('login.html', window.location.href).href;
+        window.location.href = 'login.html';
     }
 });
 
-function initializeAppLogic(user) {
-    const contentArea = document.getElementById('content-area');
-    const itemModal = new bootstrap.Modal(document.getElementById('itemModal'));
-    const itemForm = document.getElementById('itemForm');
-    const confirmActionModal = new bootstrap.Modal(document.getElementById('confirmActionModal'));
-    let currentActionInfo = { action: null, docId: null, collection: null };
-    let currentCollectionName = 'dashboard';
-
-    // --- Perbarui Info User di UI ---
+function initializeAppLogic() {
     const userDisplayName = user.displayName || user.email.split('@')[0];
     const userInitial = userDisplayName.charAt(0).toUpperCase();
     document.getElementById('sidebar-user-name').textContent = userDisplayName;
     document.getElementById('sidebar-user-email').textContent = user.email;
-    document.getElementById('header-user-name').textContent = `${userDisplayName}`;
+    document.getElementById('header-user-name').textContent = userDisplayName;
     const avatarUrl = `https://placehold.co/40x40/0d6efd/white?text=${userInitial}`;
     document.getElementById('sidebar-user-avatar').src = avatarUrl;
     document.getElementById('header-user-avatar').src = avatarUrl.replace('40x40', '32x32');
 
-    // --- Fungsi Helper untuk Datalog ---
-    async function writeLog(action, collectionName, itemData) {
-        const logData = { action, collection: collectionName, details: itemData, user: user.email, timestamp: serverTimestamp() };
-        try {
-            await addDoc(collection(db, 'users', user.uid, 'logs'), logData);
-        } catch (error) { console.error("Gagal menulis log:", error); }
-    }
+    document.getElementById('main-nav').addEventListener('click', (e) => {
+        const link = e.target.closest('.nav-link');
+        if (link) {
+            e.preventDefault();
+            const page = link.dataset.page;
+            navigate(page);
+        }
+    });
 
-    // --- Event Listener Global ---
+    document.getElementById('sidebar-toggle').addEventListener('click', () => {
+        document.body.classList.toggle('sidebar-minimized');
+    });
+
+    // Add notification modal HTML to the document body
+    const notificationModalHtml = `
+        <div class="modal fade" id="dueNotificationModal" tabindex="-1" aria-labelledby="dueNotificationModalLabel" aria-hidden="true">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="dueNotificationModalLabel">Pengingat Pengembalian Barang</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body" id="dueNotificationBody">
+                        <!-- Item list will be populated here -->
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Tutup</button>
+                        <button type="button" class="btn btn-primary" id="viewDueItemsBtn">Lihat Barang Keluar</button>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+    document.body.insertAdjacentHTML('beforeend', notificationModalHtml);
+    const dueNotificationModal = new bootstrap.Modal(document.getElementById('dueNotificationModal'));
+
+    // Function to check for items due today and show notification
+    const checkDueToday = async () => {
+        const today = new Date().toISOString().split('T')[0];
+        const q = query(
+            collection(db, 'users', user.uid, 'keluar'),
+            where('tanggal_kembali', '==', today)
+        );
+        try {
+            const snapshot = await getDocs(q);
+            if (snapshot.docs.length > 0) {
+                const items = snapshot.docs.map(doc => {
+                    const data = doc.data();
+                    return `<li>${sanitizeText(data.nama_barang || '-')} (${sanitizeText(data.jenis || '-')}, Merk: ${sanitizeText(data.merk || '-')}, Jumlah: ${data.jumlah || 0})</li>`;
+                }).join('');
+                document.getElementById('dueNotificationBody').innerHTML = `<p>Barang berikut harus dikembalikan hari ini:</p><ul>${items}</ul>`;
+                dueNotificationModal.show();
+            }
+        } catch (error) {
+            console.error('Gagal memeriksa barang yang harus dikembalikan hari ini:', error.message);
+        }
+    };
+
+    // Run checkDueToday immediately and then every 1 minute
+    checkDueToday();
+    const notificationInterval = setInterval(checkDueToday, 60 * 1000);
+
+    // Add event listener for navigation button in notification modal
+    document.getElementById('viewDueItemsBtn').addEventListener('click', () => {
+        dueNotificationModal.hide();
+        navigate('barang-keluar-temporary');
+    });
+
     document.body.addEventListener('click', async (e) => {
-        const target = e.target.closest('.btn-logout, .btn-tambah, .btn-edit, .btn-delete, #clear-log-btn, #download-report-btn, .btn-return');
+        const target = e.target.closest('.btn-tambah, .btn-edit, .btn-delete, .btn-kembalikan, .btn-logout, .clear-log-btn, #download-report-btn, .dashboard-card');
         if (!target) return;
 
-        if (target.matches('.btn-logout')) {
-            currentActionInfo = { action: 'logout' };
-            document.getElementById('confirmActionTitle').textContent = 'Konfirmasi Logout';
-            document.getElementById('confirmActionBody').textContent = 'Apakah Anda yakin ingin keluar?';
-            confirmActionModal.show();
-        } else if (target.matches('.btn-tambah')) {
-            const title = currentCollectionName === 'material' ? 'Stock Material' : 
-            currentCollectionName === 'komponen' ? 'Stock Komponen' : 'Pilih Stock Barang';
-            document.getElementById('itemModalLabel').textContent = title;
-            buildForm({}, currentCollectionName, currentCollectionName === 'transaksi' ? 'select' : undefined);
+        if (target.matches('.btn-tambah')) {
+            if (currentCollectionName === 'transaksi') {
+                document.getElementById('itemModalLabel').textContent = 'Pilih Stock Barang';
+                buildForm({}, 'transaksi', 'select');
+            } else {
+                const title = currentCollectionName === 'material' ? 'Stock Material' : 'Stock Komponen';
+                document.getElementById('itemModalLabel').textContent = `Tambah ${title}`;
+                buildForm({}, currentCollectionName);
+            }
             itemModal.show();
         } else if (target.matches('.btn-edit')) {
             const docId = target.dataset.id;
-            const coll = target.dataset.collection || currentCollectionName;
-            const docSnap = await getDoc(doc(db, 'users', user.uid, coll, docId));
-            if (docSnap.exists()) {
-                const title = coll === 'material' ? 'Stock Material' : coll === 'komponen' ? 'Stock Komponen' : 'Transaksi Keluar Masuk';
-                document.getElementById('itemModalLabel').textContent = `Edit ${title}`;
-                buildForm({ id: docId, ...docSnap.data() }, coll);
-                itemModal.show();
+            const collectionName = target.dataset.collection || currentCollectionName;
+            try {
+                const docRef = doc(db, 'users', user.uid, collectionName, docId);
+                const docSnap = await getDoc(docRef);
+                if (docSnap.exists()) {
+                    buildForm({ id: docId, ...docSnap.data() }, collectionName);
+                    itemModal.show();
+                } else {
+                    alert('Dokumen tidak ditemukan.');
+                }
+            } catch (error) {
+                console.error('Gagal memuat data untuk edit:', error.message);
+                alert('Gagal memuat data: ' + error.message);
             }
         } else if (target.matches('.btn-delete')) {
             currentActionInfo = { action: 'delete', docId: target.dataset.id, collection: target.dataset.collection || currentCollectionName };
             document.getElementById('confirmActionTitle').textContent = 'Konfirmasi Hapus';
-            document.getElementById('confirmActionBody').textContent = 'Apakah Anda yakin ingin menghapus data ini secara permanen?';
+            document.getElementById('confirmActionBody').textContent = 'Yakin ingin menghapus data ini?';
             confirmActionModal.show();
-        } else if (target.matches('#clear-log-btn')) {
-            currentActionInfo = { action: 'clear_logs' };
-            document.getElementById('confirmActionTitle').textContent = 'Konfirmasi Hapus Riwayat';
-            document.getElementById('confirmActionBody').textContent = 'Apakah Anda yakin ingin menghapus semua riwayat aktivitas?';
+        } else if (target.matches('.btn-kembalikan')) {
+            const { id, jenis, nama, merk, spesifikasi, jumlah } = target.dataset;
+            try {
+                const stockCollection = collection(db, 'users', user.uid, jenis);
+                const q = query(stockCollection,
+                    where(jenis === 'material' ? 'nama' : 'nama_barang', '==', nama),
+                    where('merk', '==', merk),
+                    where('spesifikasi', '==', spesifikasi));
+                const stockSnapshot = await getDocs(q);
+
+                if (stockSnapshot.docs.length === 0) {
+                    throw new Error('Stok tidak ditemukan.');
+                }
+
+                const stockDoc = stockSnapshot.docs[0];
+                const stockId = stockDoc.id;
+                const stockData = stockDoc.data();
+                const newJumlah = (stockData.jumlah || 0) + parseInt(jumlah);
+
+                await updateDoc(doc(db, 'users', user.uid, jenis, stockId), { jumlah: newJumlah });
+                const keluarDocRef = doc(db, 'users', user.uid, 'keluar', id);
+                const keluarDoc = await getDoc(keluarDocRef);
+                await deleteDoc(keluarDocRef);
+
+                const returnData = {
+                    jenis,
+                    nama_barang: nama,
+                    merk,
+                    spesifikasi,
+                    jumlah: parseInt(jumlah),
+                    keterangan: 'pengembalian',
+                    tanggal_keluar: keluarDoc.data().tanggal_keluar,
+                    tanggal_kembali: keluarDoc.data().tanggal_kembali,
+                    tanggal_dikembalikan: new Date().toISOString(),
+                    user: user.email,
+                    timestamp: serverTimestamp()
+                };
+                await writeLog('pengembalian', 'keluar', returnData);
+
+                loadBarangKeluarTemporaryPage();
+            } catch (error) {
+                console.error('Gagal mengembalikan barang:', error.message);
+                alert('Gagal mengembalikan barang: ' + error.message);
+            }
+        } else if (target.matches('.btn-logout')) {
+            currentActionInfo = { action: 'logout' };
+            document.getElementById('confirmActionTitle').textContent = 'Konfirmasi Logout';
+            document.getElementById('confirmActionBody').textContent = 'Yakin ingin keluar?';
+            confirmActionModal.show();
+        } else if (target.matches('.clear-log-btn')) {
+            currentActionInfo = { action: 'clear_logs', collection: target.dataset.collection || currentCollectionName };
+            document.getElementById('confirmActionTitle').textContent = 'Hapus Riwayat';
+            document.getElementById('confirmActionBody').textContent = 'Yakin ingin menghapus semua riwayat aktivitas?';
             confirmActionModal.show();
         } else if (target.matches('#download-report-btn')) {
-            generateReport();
-        } else if (target.matches('.btn-return')) {
-            const docId = target.dataset.id;
-            const docSnap = await getDoc(doc(db, 'users', user.uid, 'keluar', docId));
-            if (docSnap.exists()) {
-                const data = docSnap.data();
-                const returnDate = new Date().toISOString().split('T')[0];
-                await updateDoc(doc(db, 'users', user.uid, 'keluar', docId), { returned: true, tanggal_kembali_actual: returnDate });
-                const stockRef = doc(db, 'users', user.uid, data.jenis.toLowerCase(), data.nama_barang);
-                const stockSnap = await getDoc(stockRef);
-                let newStock = stockSnap.exists() ? stockSnap.data().jumlah || 0 : 0;
-                newStock += data.jumlah;
-                await updateDoc(stockRef, { jumlah: newStock });
-                writeLog('Dikembalikan', 'keluar', { ...data, tanggal_kembali_actual: returnDate });
-                renderTemporaryKeluarTable();
+            const startDate = document.getElementById('start-date').value;
+            const endDate = document.getElementById('end-date').value;
+            const includeStock = document.getElementById('report-stock').checked;
+            if (startDate && endDate) {
+                await generateReport(startDate, endDate, includeStock);
+            } else {
+                alert('Silakan pilih rentang tanggal.');
+            }
+        } else if (target.matches('.dashboard-card')) {
+            const page = target.dataset.page;
+            if (page) {
+                navigate(page);
             }
         }
     });
 
-    document.getElementById('sidebar-toggle').addEventListener('click', () => document.body.classList.toggle('sidebar-minimized'));
-    document.getElementById('main-nav').addEventListener('click', (e) => {
-        const link = e.target.closest('.nav-link');
-        if (link && link.dataset.page) { e.preventDefault(); navigate(link.dataset.page); }
+    itemForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const submitBtn = itemForm.querySelector('button[type="submit"]');
+        if (submitBtn) submitBtn.disabled = true;
+
+        const itemId = document.getElementById('itemId')?.value || '';
+        const collectionName = currentCollectionName;
+        let itemData = {};
+
+        try {
+            if (collectionName === 'transaksi') {
+                const jenis = document.getElementById('jenis').value;
+                const nama_barang = document.getElementById('nama_barang').value;
+                const merk = document.getElementById('merk').value;
+                const spesifikasi = document.getElementById('spesifikasi').value;
+                const jumlah = parseInt(document.getElementById('jumlah').value);
+                const transaksi = document.getElementById('transaksi').value;
+                const keterangan = document.getElementById('keterangan').value;
+                const tanggal_keluar = document.getElementById('tanggal_keluar')?.value || new Date().toISOString().split('T')[0];
+                const tanggal_kembali = document.getElementById('tanggal_kembali')?.value || '';
+
+                itemData = {
+                    jenis,
+                    nama_barang,
+                    merk,
+                    spesifikasi,
+                    jumlah,
+                    transaksi,
+                    keterangan,
+                    tanggal_keluar,
+                    tanggal_kembali: keterangan === 'temporary' ? tanggal_kembali : null,
+                    user: user.email,
+                    timestamp: serverTimestamp()
+                };
+
+                const collectionData = collection(db, 'users', user.uid, jenis);
+                const q = query(collectionData,
+                    where(jenis === 'material' ? 'nama' : 'nama_barang', '==', nama_barang),
+                    where('merk', '==', merk),
+                    where('spesifikasi', '==', spesifikasi));
+                const snapshotData = await getDocs(q);
+
+                if (snapshotData.docs.length === 0) {
+                    throw new Error('Data stok tidak ditemukan.');
+                }
+
+                const docData = snapshotData.docs[0];
+                const stockId = docData.id;
+                const stockData = docData.data();
+                let newJumlah = stockData.jumlah || 0;
+
+                if (transaksi === 'masuk') {
+                    newJumlah += jumlah;
+                } else if (transaksi === 'keluar') {
+                    newJumlah = Math.max(0, newJumlah - jumlah);
+                }
+
+                await updateDoc(doc(db, 'users', user.uid, jenis, stockId), { jumlah: newJumlah });
+                await addDoc(collection(db, 'users', user.uid, 'transaksi'), itemData);
+
+                if (keterangan === 'temporary') {
+                    await addDoc(collection(db, 'users', user.uid, 'keluar'), itemData);
+                }
+
+                await writeLog('tambah', 'transaksi', itemData);
+                itemModal.hide();
+                loadKeluarMasukPage();
+            } else {
+                if (collectionName === 'komponen') {
+                    itemData = {
+                        nama_barang: document.getElementById('nama_barang').value,
+                        merk: document.getElementById('merk').value,
+                        spesifikasi: document.getElementById('spesifikasi').value,
+                        jumlah: parseInt(document.getElementById('jumlah').value),
+                        keterangan: document.getElementById('keterangan').value
+                    };
+                } else if (collectionName === 'material') {
+                    itemData = {
+                        nama: document.getElementById('nama').value,
+                        merk: document.getElementById('merk').value,
+                        spesifikasi: document.getElementById('spesifikasi').value,
+                        jumlah: parseInt(document.getElementById('jumlah').value),
+                        keterangan: document.getElementById('keterangan').value
+                    };
+                }
+
+                if (itemId) {
+                    await updateDoc(doc(db, 'users', user.uid, collectionName, itemId), itemData);
+                    await writeLog('edit', collectionName, itemData);
+                } else {
+                    await addDoc(collection(db, 'users', user.uid, collectionName), itemData);
+                    await writeLog('tambah', collectionName, itemData);
+                }
+
+                itemModal.hide();
+                loadDataTablePage();
+            }
+        } catch (error) {
+            console.error('Gagal menyimpan data:', error.message);
+            alert('Gagal menyimpan data: ' + error.message);
+        } finally {
+            if (submitBtn) submitBtn.disabled = false;
+        }
     });
 
-    // --- Logika Tombol Konfirmasi Modal ---
+    let currentActionInfo = { action: null, docId: null, collection: null };
     document.getElementById('confirmActionBtn').addEventListener('click', async () => {
         const { action, docId, collection } = currentActionInfo;
-        if (action === 'logout') {
-            signOut(auth);
-        } else if (action === 'delete' && docId) {
-            const docRef = doc(db, 'users', user.uid, collection, docId);
-            const docSnap = await getDoc(docRef);
-            await deleteDoc(docRef);
-            writeLog('Dihapus', collection, docSnap.data());
-        } else if (action === 'clear_logs') {
-            const logsCollectionRef = collection(db, 'users', user.uid, 'logs');
-            const logsSnapshot = await getDocs(logsCollectionRef);
-            const batch = writeBatch(db);
-            logsSnapshot.forEach(doc => batch.delete(doc.ref));
-            await batch.commit();
+        try {
+            if (action === 'logout') {
+                await signOut(auth);
+            } else if (action === 'delete') {
+                await deleteDoc(doc(db, 'users', user.uid, collection, docId));
+                await writeLog('hapus', collection, { id: docId });
+            } else if (action === 'clear_logs') {
+                const logsSnapshot = await getDocs(query(
+                    collection(db, 'users', user.uid, 'logs'),
+                    where('collection', '==', collection)
+                ));
+                const batch = writeBatch(db);
+                logsSnapshot.forEach(doc => batch.delete(doc.ref));
+                await batch.commit();
+            }
+            confirmActionModal.hide();
+            if (action === 'delete' || action === 'clear_logs') {
+                if (collection === 'transaksi') {
+                    loadKeluarMasukPage();
+                } else if (collection === 'keluar') {
+                    loadBarangKeluarTemporaryPage();
+                } else {
+                    loadDataTablePage();
+                }
+            }
+        } catch (error) {
+            console.error('Gagal melakukan aksi:', error.message);
+            alert('Gagal: ' + error.message);
         }
-        confirmActionModal.hide();
-        currentActionInfo = { action: null, docId: null, collection: null };
     });
 
-    // --- Router Halaman ---
-    function navigate(page) {
-        currentCollectionName = page.split('-').pop();
-        document.querySelectorAll('#main-nav .nav-link').forEach(link => link.classList.remove('active'));
-        document.querySelector(`#main-nav .nav-link[data-page="${page}"]`).classList.add('active');
-        if (page === 'dashboard') loadDashboardPage();
-        else if (page === 'keluar-masuk') loadKeluarMasukPage();
-        else if (page === 'buat-report') loadReportPage();
-        else loadDataTablePage();
-    }
+    navigate(currentPage);
 
-    // --- Template & Form Builders ---
-    async function loadDashboardPage() {
-        contentArea.innerHTML = `
-            <div class="row g-4">
-                <div class="col-md-6 col-lg-3"><div class="card text-white bg-primary"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title fs-2" id="total-material">...</h5><span>Total Material</span></div><i class="bi bi-box-seam" style="font-size: 3rem; opacity: 0.5;"></i></div></div></div>
-                <div class="col-md-6 col-lg-3"><div class="card text-white bg-success"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title fs-2" id="total-komponen">...</h5><span>Total Komponen</span></div><i class="bi bi-tools" style="font-size: 3rem; opacity: 0.5;"></i></div></div></div>
-                <div class="col-md-6 col-lg-3"><div class="card text-white bg-warning"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title fs-2" id="total-keluar">...</h5><span>Barang Keluar</span></div><i class="bi bi-box-arrow-up-right" style="font-size: 3rem; opacity: 0.5;"></i></div></div></div>
-                <div class="col-md-6 col-lg-3"><div class="card text-white bg-info"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title fs-2" id="total-masuk">...</h5><span>Barang Masuk</span></div><i class="bi bi-box-arrow-in-right" style="font-size: 3rem; opacity: 0.5;"></i></div></div></div>
-            </div>`;
-        
-        // Update stats
-        ['material', 'komponen', 'keluar', 'transaksi'].forEach(async (coll) => {
-            const snapshot = await getDocs(collection(db, 'users', user.uid, coll));
-            const elementId = coll === 'keluar' ? 'total-keluar' : coll === 'transaksi' ? 'total-masuk' : `total-${coll}`;
-            if(document.getElementById(elementId)) document.getElementById(elementId).textContent = snapshot.size;
+    // Return cleanup function to clear interval
+    return () => clearInterval(notificationInterval);
+}
+
+function navigate(page) {
+    currentPage = page;
+    if (page === 'dashboard') {
+        loadDashboardPage();
+    } else if (page === 'material' || page === 'komponen') {
+        currentCollectionName = page;
+        loadDataTablePage();
+    } else if (page === 'keluar-masuk') {
+        currentCollectionName = 'transaksi';
+        loadKeluarMasukPage();
+    } else if (page === 'barang-keluar-temporary') {
+        currentCollectionName = 'keluar';
+        loadBarangKeluarTemporaryPage();
+    } else if (page === 'buat-report') {
+        loadBuatReportPage();
+    } else if (page === 'logout') {
+        document.querySelector('.btn-logout').click();
+    }
+}
+
+async function loadDashboardPage() {
+    const contentArea = document.getElementById('content-area');
+    contentArea.innerHTML = `
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="#">Home</a></li>
+                <li class="breadcrumb-item active">Dashboard</li>
+            </ol>
+        </nav>
+        <h4 class="mb-3">Dashboard</h4>
+        <div class="row">
+            <div class="col-md-4">
+                <div class="card mb-4 dashboard-card" data-page="material" style="cursor: pointer;">
+                    <div class="card-body">
+                        <h5 class="card-title">Total Stok Material</h5>
+                        <p class="card-text fs-3" id="totalMaterial">Memuat...</p>
+                        <p class="card-text text-muted" id="totalMaterialJenis">Memuat...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card mb-4 dashboard-card" data-page="komponen" style="cursor: pointer;">
+                    <div class="card-body">
+                        <h5 class="card-title">Total Stok Komponen</h5>
+                        <p class="card-text fs-3" id="totalKomponen">Memuat...</p>
+                        <p class="card-text text-muted" id="totalKomponenJenis">Memuat...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card mb-4 dashboard-card" data-page="keluar-masuk" style="cursor: pointer;">
+                    <div class="card-body">
+                        <h5 class="card-title">Transaksi Terbaru</h5>
+                        <p class="card-text fs-3" id="recentTransaksi">Memuat...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card mb-4 dashboard-card" data-page="barang-keluar-temporary" style="cursor: pointer;">
+                    <div class="card-body">
+                        <h5 class="card-title">Barang Keluar Temporary</h5>
+                        <p class="card-text fs-3" id="temporaryKeluar">Memuat...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card mb-4 dashboard-card" data-page="keluar-masuk" style="cursor: pointer;">
+                    <div class="card-body">
+                        <h5 class="card-title">Total Barang Masuk</h5>
+                        <p class="card-text fs-3" id="totalMasuk">Memuat...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card mb-4 dashboard-card" data-page="keluar-masuk" style="cursor: pointer;">
+                    <div class="card-body">
+                        <h5 class="card-title">Total Barang Keluar</h5>
+                        <p class="card-text fs-3" id="totalKeluar">Memuat...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    try {
+        const materialSnapshot = await getDocs(query(collection(db, 'users', user.uid, 'material')));
+        const totalMaterial = materialSnapshot.docs.reduce((sum, doc) => sum + (doc.data().jumlah || 0), 0);
+        const totalMaterialJenis = materialSnapshot.docs.length;
+        document.getElementById('totalMaterial').textContent = `${totalMaterial} unit`;
+        document.getElementById('totalMaterialJenis').textContent = `${totalMaterialJenis} jenis`;
+
+        const komponenSnapshot = await getDocs(query(collection(db, 'users', user.uid, 'komponen')));
+        const totalKomponen = komponenSnapshot.docs.reduce((sum, doc) => sum + (doc.data().jumlah || 0), 0);
+        const totalKomponenJenis = komponenSnapshot.docs.length;
+        document.getElementById('totalKomponen').textContent = `${totalKomponen} unit`;
+        document.getElementById('totalKomponenJenis').textContent = `${totalKomponenJenis} jenis`;
+
+        const transaksiSnapshot = await getDocs(query(
+            collection(db, 'users', user.uid, 'transaksi'),
+            orderBy('timestamp', 'desc'),
+            limit(1)
+        ));
+        const recentTransaksi = transaksiSnapshot.docs.length === 0
+            ? 'Tidak ada transaksi'
+            : `${transaksiSnapshot.docs[0].data().nama_barang} (${transaksiSnapshot.docs[0].data().transaksi}, ${transaksiSnapshot.docs[0].data().jumlah} unit)`;
+        document.getElementById('recentTransaksi').textContent = recentTransaksi;
+
+        const keluarSnapshot = await getDocs(query(collection(db, 'users', user.uid, 'keluar')));
+        const totalKeluarTemporary = keluarSnapshot.docs.reduce((sum, doc) => sum + (doc.data().jumlah || 0), 0);
+        document.getElementById('temporaryKeluar').textContent = `${totalKeluarTemporary} unit`;
+
+        const masukSnapshot = await getDocs(query(
+            collection(db, 'users', user.uid, 'transaksi'),
+            where('transaksi', '==', 'masuk')
+        ));
+        const totalMasuk = masukSnapshot.docs.reduce((sum, doc) => sum + (doc.data().jumlah || 0), 0);
+        document.getElementById('totalMasuk').textContent = `${totalMasuk} unit`;
+
+        const keluarTransaksiSnapshot = await getDocs(query(
+            collection(db, 'users', user.uid, 'transaksi'),
+            where('transaksi', '==', 'keluar')
+        ));
+        const totalKeluar = keluarTransaksiSnapshot.docs.reduce((sum, doc) => sum + (doc.data().jumlah || 0), 0);
+        document.getElementById('totalKeluar').textContent = `${totalKeluar} unit`;
+    } catch (error) {
+        console.error('Gagal memuat dashboard:', error.message);
+        alert('Gagal memuat dashboard: ' + error.message);
+        document.getElementById('totalMaterial').textContent = 'Error';
+        document.getElementById('totalMaterialJenis').textContent = 'Error';
+        document.getElementById('totalKomponen').textContent = 'Error';
+        document.getElementById('totalKomponenJenis').textContent = 'Error';
+        document.getElementById('recentTransaksi').textContent = 'Error';
+        document.getElementById('temporaryKeluar').textContent = 'Error';
+        document.getElementById('totalMasuk').textContent = 'Error';
+        document.getElementById('totalKeluar').textContent = 'Error';
+    }
+}
+
+async function loadDataTablePage() {
+    const config = {
+        material: { title: 'Data Material', headers: ['Nama Material', 'Merk', 'Spesifikasi', 'Jumlah', 'Keterangan'], keys: ['nama', 'merk', 'spesifikasi', 'jumlah', 'keterangan'] },
+        komponen: { title: 'Data Komponen', headers: ['Nama Komponen', 'Merk', 'Spesifikasi', 'Jumlah', 'Keterangan'], keys: ['nama_barang', 'merk', 'spesifikasi', 'jumlah', 'keterangan'] }
+    };
+    const pageConfig = config[currentCollectionName];
+    const contentArea = document.getElementById('content-area');
+    contentArea.innerHTML = `
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="#">Home</a></li>
+                <li class="breadcrumb-item active">${pageConfig.title}</li>
+            </ol>
+        </nav>
+        <div class="card mb-4">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <h5>Daftar ${pageConfig.title}</h5>
+                <div>
+                    <button class="btn btn-primary btn-tambah"><i class="bi bi-plus-circle me-2"></i>Tambah ${pageConfig.title}</button>
+                    <input type="text" class="form-control d-inline-block w-auto ms-2" id="search-input" placeholder="Cari...">
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive scrollable-container">
+                    <table class="table table-striped table-hover table-bordered">
+                        <thead class="table-dark">
+                            <tr><th>NO</th>${pageConfig.headers.map(h => `<th>${h}</th>`).join('')}<th>OPSI</th></tr>
+                        </thead>
+                        <tbody id="table-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5>Riwayat Aktivitas ${pageConfig.title}</h5>
+                <div>
+                    <button class="btn btn-outline-secondary btn-sm clear-log-btn ms-2" data-collection="${currentCollectionName}"><i class="bi bi-trash me-1"></i>Bersihkan</button>
+                    <input type="text" class="form-control d-inline-block log-search ms-2" id="log-search" placeholder="Cari...">
+                </div>
+            </div>
+            <div class="card-body p-0 scrollable-container" id="log-container">
+                <ul class="list-group list-group-flush"></ul>
+            </div>
+        </div>
+    `;
+
+    const tableBody = document.getElementById('table-body');
+    const searchInput = document.getElementById('search-input');
+    const logSearchInput = document.getElementById('log-search');
+    let tableData = [];
+    let logData = [];
+
+    const q = query(collection(db, 'users', user.uid, currentCollectionName));
+    const unsubscribeTable = onSnapshot(q, (snapshot) => {
+        tableData = snapshot.docs.map((doc, index) => ({
+            id: doc.id,
+            data: doc.data(),
+            index: index + 1
+        }));
+
+        renderTable(tableData);
+
+        searchInput.addEventListener('input', () => {
+            const searchTerm = searchInput.value.toLowerCase();
+            const filteredData = tableData.filter(item => {
+                const data = item.data;
+                return (
+                    (data.nama || data.nama_barang || '').toLowerCase().includes(searchTerm) ||
+                    (data.merk || '').toLowerCase().includes(searchTerm) ||
+                    (data.spesifikasi || '').toLowerCase().includes(searchTerm)
+                );
+            });
+            renderTable(filteredData);
         });
-    }
-    
-    function loadDataTablePage() {
-        const config = {
-            'material': { title: 'Stock Material', headers: ['NAMA MATERIAL', 'MERK', 'SPESIFIKASI', 'JUMLAH', 'KETERANGAN']},
-            'komponen': { title: 'Stock Komponen', headers: ['NAMA KOMPONEN', 'MERK', 'SPESIFIKASI', 'JUMLAH', 'KETERANGAN']},
-            'keluar': { title: 'Barang Keluar (Temporary)', headers: ['JENIS', 'NAMA BARANG', 'MERK', 'SPESIFIKASI', 'JUMLAH', 'TANGGAL KELUAR', 'KETERANGAN']}
-        };
-        const pageConfig = config[currentCollectionName];
-        contentArea.innerHTML = `
-            <nav aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="#">Home</a></li><li class="breadcrumb-item active">${pageConfig.title}</li></ol></nav>
-            <div class="card mb-4"><div class="card-header bg-white d-flex justify-content-between align-items-center"><h5>Daftar ${pageConfig.title}</h5>${
-                currentCollectionName !== 'keluar' ? '<button class="btn btn-primary btn-tambah"><i class="bi bi-plus-circle me-2"></i>Tambah ' + pageConfig.title + '</button>' : ''
-            }</div><div class="card-body"><div class="table-responsive scrollable-container"><table class="table table-striped table-hover table-bordered"><thead class="table-dark"><tr><th>NO</th>${pageConfig.headers.map(h => `<th>${h}</th>`).join('')}${currentCollectionName !== 'keluar' ? '<th>OPSI</th>' : ''}</tr></thead><tbody id="table-body"></tbody></table></div></div></div>${
-                currentCollectionName !== 'keluar' ? '<div class="card"><div class="card-header d-flex justify-content-between align-items-center">Riwayat Aktivitas ' + pageConfig.title + '<button class="btn btn-outline-secondary btn-sm" id="clear-log-btn"><i class="bi bi-trash me-1"></i>Bersihkan</button></div><div class="card-body p-0 scrollable-container" id="log-container"><ul class="list-group list-group-flush"></ul></div></div>' : ''
-            }`;
-        if (currentCollectionName === 'keluar') renderTemporaryKeluarTable();
-        else renderTableData(pageConfig.headers);
-        if (currentCollectionName !== 'keluar') renderLogs();
+    }, (error) => {
+        console.error('Failed to load table data:', error.message);
+        tableBody.innerHTML = `<tr><td colspan="${pageConfig.headers.length + 2}" class="text-center">Failed to load data: ${error.message}</td></tr>`;
+    });
+
+    function renderTable(data) {
+        tableBody.innerHTML = data.length === 0
+            ? `<tr><td colspan="${pageConfig.headers.length + 2}" class="text-center">Tidak ada data.</td></tr>`
+            : data.map(item => {
+                const data = item.data;
+                return `
+                    <tr>
+                        <td>${item.index}</td>
+                        ${pageConfig.keys.map(key => `<td>${sanitizeText(data[key] || '-')}</td>`).join('')}
+                        <td>
+                            <button class="btn btn-warning btn-sm btn-edit" data-id="${item.id}"><i class="bi bi-pencil-square"></i></button>
+                            <button class="btn btn-danger btn-sm btn-delete" data-id="${item.id}"><i class="bi bi-trash"></i></button>
+                        </td>
+                    </tr>`;
+            }).join('');
     }
 
-    function loadKeluarMasukPage() {
-        contentArea.innerHTML = `
-        <nav aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="#">Home</a></li><li class="breadcrumb-item active">Keluar Masuk</li></ol></nav>
-        <div class="card mb-4"><div class="card-header bg-white d-flex justify-content-between align-items-center"><h5>Keluar Masuk</h5><button class="btn btn-primary btn-tambah"><i class="bi bi-plus-circle me-2"></i>Tambah Keluar Masuk</button></div><div class="card-body"></div></div>
-        <div class="card"><div class="card-header d-flex justify-content-between align-items-center">Riwayat Aktivitas Keluar Masuk<button class="btn btn-outline-secondary btn-sm" id="clear-log-btn"><i class="bi bi-trash me-1"></i>Bersihkan</button></div><div class="card-body p-0 scrollable-container" id="log-container"><ul class="list-group list-group-flush"></ul></div></div>`;
-        renderLogs();
+    const logQuery = query(collection(db, 'users', user.uid, 'logs'), where('collection', '==', currentCollectionName), orderBy('timestamp', 'desc'));
+    const unsubscribeLogs = onSnapshot(logQuery, (snapshot) => {
+        logData = snapshot.docs.map(doc => ({ id: doc.id, data: doc.data() }));
+        renderLogs(logData);
+
+        logSearchInput.addEventListener('input', () => {
+            const searchTerm = logSearchInput.value.toLowerCase();
+            const filteredLogs = logData.filter(log => {
+                const details = log.data.details || {};
+                return (
+                    (details.nama || details.nama_barang || '').toLowerCase().includes(searchTerm) ||
+                    (details.merk || '').toLowerCase().includes(searchTerm) ||
+                    (details.spesifikasi || '').toLowerCase().includes(searchTerm) ||
+                    (log.data.action || '').toLowerCase().includes(searchTerm)
+                );
+            });
+            renderLogs(filteredLogs);
+        });
+    }, (error) => {
+        console.error('Failed to load logs:', error.message);
+        document.querySelector('#log-container ul').innerHTML = `<li class="list-group-item text-center text-danger">Failed to load logs: ${error.message}</li>`;
+    });
+
+    function renderLogs(data) {
+        const logContainer = document.querySelector('#log-container ul');
+        logContainer.innerHTML = data.length === 0
+            ? '<li class="list-group-item text-muted text-center">Belum ada aktivitas.</li>'
+            : data.map(doc => {
+                const log = doc.data;
+                const details = log.details || {}; // Fallback to empty object
+                const docName = sanitizeText(details.nama || details.nama_barang || 'Item');
+                const itemDetails = ` (Merk: ${sanitizeText(details.merk || '-')}, Spek: ${sanitizeText(details.spesifikasi || '-')}, Jml: ${details.jumlah || 0}, Ket: ${sanitizeText(details.keterangan || '-')})`;
+                const date = log.timestamp?.toDate()?.toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }) || 'Baru saja';
+                return `<li class="list-group-item">[${sanitizeText(date)}] Item <strong>${docName}</strong> telah <strong>${sanitizeText(log.action)}</strong>.${itemDetails}</li>`;
+            }).join('');
     }
 
-    function loadReportPage() {
-        contentArea.innerHTML = `
-            <nav aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="#">Home</a></li><li class="breadcrumb-item active">Buat Report</li></ol></nav>
-            <div class="card mb-4">
-                <div class="card-header bg-white"><h5>Konfigurasi Report</h5></div>
-                <div class="card-body">
+    return () => {
+        unsubscribeTable();
+        unsubscribeLogs();
+    };
+}
+
+async function loadKeluarMasukPage() {
+    const contentArea = document.getElementById('content-area');
+    contentArea.innerHTML = `
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="#">Home</a></li>
+                <li class="breadcrumb-item active">Keluar Masuk</li>
+            </ol>
+        </nav>
+        <div class="card mb-4">
+            <div class="card-header bg-white d-flex justify-content-start align-items-center">
+                <button class="btn btn-primary btn-lg btn-tambah"><i class="bi bi-plus-circle me-2"></i>Tambah Keluar Masuk</button>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <h5>Riwayat Aktivitas Keluar Masuk</h5>
+                <div>
+                    <button class="btn btn-outline-secondary btn-sm clear-log-btn ms-2" data-collection="transaksi"><i class="bi bi-trash me-1"></i>Bersihkan</button>
+                    <input type="text" class="form-control d-inline-block log-search" id="search-transaksi" placeholder="Cari...">
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="table scrollable-container">
+                    <table class="table table-striped table-hover table-bordered">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>NO</th>
+                                <th>Jenis</th>
+                                <th>Nama Barang</th>
+                                <th>Keluar/Tambah</th>
+                                <th>Keterangan</th>
+                                <th>Merk</th>
+                                <th>Spesifikasi</th>
+                                <th>Jumlah</th>
+                                <th>Waktu</th>
+                                <th>Tanggal Kembali</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const tableBody = document.getElementById('table-body');
+    const searchInput = document.getElementById('search-transaksi');
+    let tableData = [];
+
+    const q = query(collection(db, 'users', user.uid, 'transaksi'), orderBy('timestamp', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+        tableData = snapshot.docs
+            .filter(doc => doc.data().keterangan !== 'pengembalian')
+            .map((doc, index) => ({
+                id: doc.id,
+                data: doc.data(),
+                index: index + 1
+            }));
+
+        renderTable(tableData);
+
+        searchInput.addEventListener('input', () => {
+            const searchTerm = searchInput.value.toLowerCase();
+            const filteredData = tableData.filter(item => {
+                const data = item.data;
+                return (
+                    (data.jenis || '').toLowerCase().includes(searchTerm) ||
+                    (data.nama_barang || '').toLowerCase().includes(searchTerm) ||
+                    (data.merk || '').toLowerCase().includes(searchTerm) ||
+                    (data.spesifikasi || '').toLowerCase().includes(searchTerm)
+                );
+            });
+            renderTable(filteredData);
+        });
+    }, (error) => {
+        console.error('Failed to load transaction data:', error.message);
+        tableBody.innerHTML = `<tr><td colspan="10" class="text-center">Failed to load data: ${error.message}</td></tr>`;
+    });
+
+    function renderTable(data) {
+        tableBody.innerHTML = data.length === 0
+            ? `<tr><td colspan="10" class="text-center">Tidak ada data.</td></tr>`
+            : data.map(item => {
+                const data = item.data;
+                const waktu = data.timestamp?.toDate()?.toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }) || '-';
+                return `
+                    <tr>
+                        <td>${item.index}</td>
+                        <td>${sanitizeText(data.jenis || '-')}</td>
+                        <td>${sanitizeText(data.nama_barang || '-')}</td>
+                        <td>${sanitizeText(data.transaksi || '-')}</td>
+                        <td>${sanitizeText(data.keterangan || '-')}</td>
+                        <td>${sanitizeText(data.merk || '-')}</td>
+                        <td>${sanitizeText(data.spesifikasi || '-')}</td>
+                        <td>${data.jumlah || 0}</td>
+                        <td>${waktu}</td>
+                        <td>${sanitizeText(data.tanggal_kembali || '-')}</td>
+                    </tr>`;
+            }).join('');
+    }
+
+    return unsubscribe;
+}
+
+async function loadBarangKeluarTemporaryPage() {
+    const contentArea = document.getElementById('content-area');
+    contentArea.innerHTML = `
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="#">Home</a></li>
+                <li class="breadcrumb-item active">Barang Keluar (Temporary)</li>
+            </ol>
+        </nav>
+        <div class="card mb-4">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <h5>Data Barang Keluar (Temporary)</h5>
+                <input type="text" class="form-control log-search" id="search-keluar" placeholder="Cari...">
+            </div>
+            <div class="card-body">
+                <div class="table scrollable-container">
+                    <table class="table table-striped table-hover table-bordered">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>NO</th>
+                                <th>Jenis Barang</th>
+                                <th>Nama</th>
+                                <th>Merk</th>
+                                <th>Spesifikasi</th>
+                                <th>Jumlah</th>
+                                <th>Keterangan</th>
+                                <th>Tanggal Pinjam</th>
+                                <th>Tanggal Kembali</th>
+                                <th>Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <h5>Riwayat Aktivitas Barang Temporary</h5>
+                <div>
+                    <button class="btn btn-outline-secondary btn-sm clear-log-btn ms-2" data-collection="keluar"><i class="bi bi-trash me-1"></i>Bersihkan</button>
+                    <input type="text" class="form-control d-inline-block log-search" id="log-search" placeholder="Cari...">
+                </div>
+            </div>
+            <div class="card-body p-3 scrollable-container">
+                <div class="table-responsive scrollable-container">
+                    <table class="table table-striped table-hover table-bordered" style="min-width: 1000px;">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>Tanggal Dikembalikan</th>
+                                <th>Jenis</th>
+                                <th>Nama Barang</th>
+                                <th>Merk</th>
+                                <th>Spesifikasi</th>
+                                <th>Jumlah</th>
+                                <th>Tanggal Pinjam</th>
+                                <th>Tanggal Kembali</th>
+                            </tr>
+                        </thead>
+                        <tbody id="log-table-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const tableBody = document.getElementById('table-body');
+    const logTableBody = document.getElementById('log-table-body');
+    const searchInput = document.getElementById('search-keluar');
+    const logSearchInput = document.getElementById('log-search');
+    let tableData = [];
+    let logData = [];
+
+    const q = query(collection(db, 'users', user.uid, 'keluar'), orderBy('timestamp', 'desc'));
+    const unsubscribeTable = onSnapshot(q, (snapshot) => {
+        const today = new Date().toISOString().split('T')[0];
+        tableData = snapshot.docs.map((doc, index) => {
+            const data = doc.data();
+            const isDueToday = data.tanggal_kembali === today;
+            console.log(`Item: ${data.nama_barang}, Tanggal Kembali: ${data.tanggal_kembali}, Today: ${today}, Is Due Today: ${isDueToday}`); // Debug log
+            return {
+                id: doc.id,
+                data,
+                index: index + 1,
+                isDueToday
+            };
+        });
+
+        renderTable(tableData);
+
+        searchInput.addEventListener('input', () => {
+            const searchTerm = searchInput.value.toLowerCase();
+            const filteredData = tableData.filter(item => {
+                const data = item.data;
+                return (
+                    (data.nama_barang || '').toLowerCase().includes(searchTerm) ||
+                    (data.merk || '').toLowerCase().includes(searchTerm) ||
+                    (data.spesifikasi || '').toLowerCase().includes(searchTerm) ||
+                    (data.jenis || '').toLowerCase().includes(searchTerm)
+                );
+            });
+            renderTable(filteredData);
+        });
+    }, (error) => {
+        console.error('Failed to load barang keluar data:', error.message);
+        tableBody.innerHTML = `<tr><td colspan="10" class="text-center">Failed to load data: ${error.message}</td></tr>`;
+    });
+
+    function renderTable(data) {
+        tableBody.innerHTML = data.length === 0
+            ? `<tr><td colspan="10" class="text-center">Tidak ada data.</td></tr>`
+            : data.map(item => {
+                const data = item.data;
+                const safeNama = sanitizeAttribute(data.nama_barang || '');
+                const safeMerk = sanitizeAttribute(data.merk || '');
+                const safeSpesifikasi = sanitizeAttribute(data.spesifikasi || '');
+                const rowStyle = item.isDueToday ? 'style="background-color: rgba(255, 255, 0, 0.2);"' : '';
+                return `
+                    <tr ${rowStyle}>
+                        <td>${item.index}</td>
+                        <td>${sanitizeText(data.jenis || '-')}</td>
+                        <td>${sanitizeText(data.nama_barang || '-')}</td>
+                        <td>${sanitizeText(data.merk || '-')}</td>
+                        <td>${sanitizeText(data.spesifikasi || '-')}</td>
+                        <td>${data.jumlah || 0}</td>
+                        <td>${sanitizeText(data.keterangan || '-')}</td>
+                        <td>${sanitizeText(data.tanggal_keluar || '-')}</td>
+                        <td>${sanitizeText(data.tanggal_kembali || '-')}</td>
+                        <td>
+                            <button class="btn btn-success btn-sm btn-kembalikan"
+                                    data-id="${item.id}"
+                                    data-jenis="${sanitizeAttribute(data.jenis || '')}"
+                                    data-nama="${safeNama}"
+                                    data-merk="${safeMerk}"
+                                    data-spesifikasi="${safeSpesifikasi}"
+                                    data-jumlah="${data.jumlah || 0}">Kembalikan</button>
+                        </td>
+                    </tr>`;
+            }).join('');
+    }
+
+    const logQuery = query(
+        collection(db, 'users', user.uid, 'logs'),
+        where('action', '==', 'pengembalian'),
+        where('collection', '==', 'keluar'),
+        orderBy('timestamp', 'desc')
+    );
+    const unsubscribeLogs = onSnapshot(logQuery, (snapshot) => {
+        logData = snapshot.docs.map(doc => {
+            const data = doc.data();
+            const details = data.details || {};
+            const tanggalKembali = details.tanggal_kembali ? new Date(details.tanggal_kembali) : null;
+            const tanggalDikembalikan = details.tanggal_dikembalikan ? new Date(details.tanggal_dikembalikan) : null;
+            const isLate = tanggalKembali && tanggalDikembalikan && tanggalDikembalikan > tanggalKembali;
+            return { id: doc.id, data, isLate };
+        });
+        renderLogs(logData);
+
+        logSearchInput.addEventListener('input', () => {
+            const searchTerm = logSearchInput.value.toLowerCase();
+            const filteredLogs = logData.filter(log => {
+                const details = log.data.details || {};
+                return (
+                    (details.nama_barang || '').toLowerCase().includes(searchTerm) ||
+                    (details.jenis || '').toLowerCase().includes(searchTerm) ||
+                    (details.merk || '').toLowerCase().includes(searchTerm) ||
+                    (details.spesifikasi || '').toLowerCase().includes(searchTerm)
+                );
+            });
+            renderLogs(filteredLogs);
+        });
+    }, (error) => {
+        console.error('Failed to load return logs:', error.message);
+        logTableBody.innerHTML = `<tr><td colspan="8" class="text-center">Failed to load history: ${error.message}</td></tr>`;
+    });
+
+    function renderLogs(data) {
+        logTableBody.innerHTML = data.length === 0
+            ? '<tr><td colspan="8" class="text-center">Belum ada aktivitas.</td></tr>'
+            : data.map(doc => {
+                const log = doc.data;
+                const details = log.details || {}; // Fallback to empty object
+                const datePinjam = sanitizeText(details.tanggal_keluar || '-');
+                const dateKembali = sanitizeText(details.tanggal_kembali || '-');
+                const dateDikembalikan = details.tanggal_dikembalikan
+                    ? new Date(details.tanggal_dikembalikan).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })
+                    : '-';
+                const rowStyle = doc.isLate ? 'style="background-color: rgba(255, 0, 0, 0.2);"' : '';
+                return `
+                    <tr ${rowStyle}>
+                        <td>${sanitizeText(dateDikembalikan)}</td>
+                        <td>${sanitizeText(details.jenis || '-')}</td>
+                        <td>${sanitizeText(details.nama_barang || '-')}</td>
+                        <td>${sanitizeText(details.merk || '-')}</td>
+                        <td>${sanitizeText(details.spesifikasi || '-')}</td>
+                        <td>${details.jumlah || 0}</td>
+                        <td>${datePinjam}</td>
+                        <td>${dateKembali}</td>
+                    </tr>`;
+            }).join('');
+    }
+
+    return () => {
+        unsubscribeTable();
+        unsubscribeLogs();
+    };
+}
+
+async function loadBuatReportPage() {
+    const contentArea = document.getElementById('content-area');
+    contentArea.innerHTML = `
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="#">Home</a></li>
+                <li class="breadcrumb-item active">Buat Report</li>
+            </ol>
+        </nav>
+        <div class="card">
+            <div class="card-header bg-white">
+                <h5>Konfigurasi Report</h5>
+            </div>
+            <div class="card-body">
+                <form id="reportForm">
                     <div class="mb-3">
                         <label class="form-label">Pilih Data untuk Report</label>
                         <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="report-stock" value="stock">
+                            <input class="form-check-input" type="checkbox" id="report-stock">
                             <label class="form-check-label" for="report-stock">Tampilkan Stock Terbaru</label>
-                        </div>
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="report-keluar" value="keluar">
-                            <label class="form-check-label" for="report-keluar">Barang Keluar</label>
-                        </div>
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="report-masuk" value="transaksi">
-                            <label class="form-check-label" for="report-masuk">Barang Masuk</label>
                         </div>
                     </div>
                     <div class="mb-3 date-picker-container">
-                        <label class="form-label">Rentang Tanggal</label>
+                        <label class="form-label">Tanggal</label>
                         <div class="input-group">
-                            <input type="date" class="form-control" id="start-date">
+                            <input type="date" class="form-control" id="start-date" required>
                             <span class="input-group-text">s/d</span>
-                            <input type="date" class="form-control" id="end-date">
+                            <input type="date" class="form-control" id="end-date" required>
                         </div>
                     </div>
-                    <button class="btn btn-primary" id="download-report-btn" disabled><i class="bi bi-download me-2"></i>Download Report</button>
-                </div>
-            </div>`;
-        
-        // Enable/disable download button based on date inputs
-        const startDateInput = document.getElementById('start-date');
-        const endDateInput = document.getElementById('end-date');
-        const downloadBtn = document.getElementById('download-report-btn');
-        function checkDateInputs() {
-            downloadBtn.disabled = !(startDateInput.value && endDateInput.value);
+                    <button type="submit" class="btn btn-primary" id="download-report-btn" disabled><i class="bi bi-download me-2"></i>Download Report</button>
+                </form>
+            </div>
+        </div>
+    `;
+
+    const reportForm = document.getElementById('reportForm');
+    const startDateInput = document.getElementById('start-date');
+    const endDateInput = document.getElementById('end-date');
+    const downloadBtn = document.getElementById('download-report-btn');
+
+    const updateButtonState = () => {
+        downloadBtn.disabled = !startDateInput.value || !endDateInput.value;
+    };
+
+    startDateInput.addEventListener('input', updateButtonState);
+    endDateInput.addEventListener('input', updateButtonState);
+
+    reportForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const startDate = startDateInput.value;
+        const endDate = endDateInput.value;
+        const includeStock = document.getElementById('report-stock').checked;
+        if (startDate && endDate) {
+            await generateReport(startDate, endDate, includeStock);
+        } else {
+            alert('Silakan pilih rentang tanggal.');
         }
-        startDateInput.addEventListener('change', checkDateInputs);
-        endDateInput.addEventListener('change', checkDateInputs);
+    });
+}
+
+async function generateReport(startDate, endDate, includeLatestStock) {
+    const doc = new jsPDF();
+    doc.setFontSize(16);
+    doc.text('Laporan Transaksi Stok', 20, 20);
+    doc.setFontSize(12);
+    doc.text(`Periode: ${startDate} s/d ${endDate}`, 20, 30);
+
+    let tableData = [];
+    try {
+        const transaksiSnapshot = await getDocs(collection(db, 'users', user.uid, 'transaksi'));
+        tableData = transaksiSnapshot.docs
+            .map(doc => doc.data())
+            .filter(data => {
+                const tanggal = data.tanggal_keluar;
+                return (!startDate || tanggal >= startDate) && (!endDate || tanggal <= endDate) && data.keterangan !== 'pengembalian';
+            })
+            .map(data => [
+                sanitizeText(data.nama_barang || '-'),
+                sanitizeText(data.transaksi || '-'),
+                sanitizeText(data.keterangan || '-'),
+                sanitizeText(data.merk || '-'),
+                sanitizeText(data.spesifikasi || '-'),
+                data.jumlah || 0,
+                sanitizeText(data.tanggal_keluar || '-'),
+                sanitizeText(data.tanggal_kembali || '-'),
+                sanitizeText(data.user || '-')
+            ]);
+    } catch (error) {
+        console.error('Gagal memuat transaksi:', error.message);
+        alert('Gagal memuat transaksi: ' + error.message);
+        return;
     }
 
-    async function buildForm(data = {}, coll = currentCollectionName, stage = 'select') {
+    doc.autoTable({
+        head: [['Nama Barang', 'Keluar/Tambah', 'Keterangan', 'Merk', 'Spesifikasi', 'Jumlah', 'Tanggal', 'Tanggal Kembali', 'User']],
+        body: tableData,
+        startY: 40
+    });
+
+    if (includeLatestStock) {
+        let finalY = doc.lastAutoTable.finalY || 40;
+        doc.setFontSize(14);
+        doc.text('Stok Material Terbaru', 20, finalY + 20);
+
+        let materialData = [];
+        try {
+            const materialSnapshot = await getDocs(collection(db, 'users', user.uid, 'material'));
+            materialData = materialSnapshot.docs.map(doc => {
+                const data = doc.data();
+                return [
+                    sanitizeText(data.nama || '-'),
+                    sanitizeText(data.merk || '-'),
+                    sanitizeText(data.spesifikasi || '-'),
+                    data.jumlah || 0,
+                    sanitizeText(data.keterangan || '-')
+                ];
+            });
+        } catch (error) {
+            console.error('Gagal memuat material:', error.message);
+            alert('Gagal memuat material: ' + error.message);
+        }
+
+        doc.autoTable({
+            head: [['Nama', 'Merk', 'Spesifikasi', 'Jumlah', 'Keterangan']],
+            body: materialData,
+            startY: finalY + 30
+        });
+
+        finalY = doc.lastAutoTable.finalY;
+        doc.text('Stok Komponen Terbaru', 20, finalY + 20);
+
+        let komponenData = [];
+        try {
+            const komponenSnapshot = await getDocs(collection(db, 'users', user.uid, 'komponen'));
+            komponenData = komponenSnapshot.docs.map(doc => {
+                const data = doc.data();
+                return [
+                    sanitizeText(data.nama_barang || '-'),
+                    sanitizeText(data.merk || '-'),
+                    sanitizeText(data.spesifikasi || '-'),
+                    data.jumlah || 0,
+                    sanitizeText(data.keterangan || '-')
+                ];
+            });
+        } catch (error) {
+            console.error('Gagal memuat komponen:', error.message);
+            alert('Gagal memuat komponen: ' + error.message);
+        }
+
+        doc.autoTable({
+            head: [['Nama Barang', 'Merk', 'Spesifikasi', 'Jumlah', 'Keterangan']],
+            body: komponenData,
+            startY: finalY + 30
+        });
+    }
+
+    doc.save(`Laporan_Stok_${startDate}_${endDate}.pdf`);
+}
+
+async function buildForm(data = {}, coll = currentCollectionName, stage = undefined) {
     const isEdit = !!data.id;
-    let formHtml = `<input type="hidden" id="itemId" value="${data.id || ''}">`;
+    let formHtml = `<input type="hidden" id="itemId" value="${sanitizeAttribute(data.id || '')}">`;
 
     if (coll === 'komponen') {
-        // Keep existing komponen form logic (unchanged)
         formHtml += `
-            <div class="mb-3"><label class="form-label">Nama Komponen</label><select class="form-select" id="nama_barang" required><option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
-                <option>MCB</option>
-                <option>MCCB</option>
-                <option>Relay</option>
-                <option>Kontaktor</option>
-                <option>Thermal</option>
-                <option>Timer</option>
-                <option>Push Button</option>
-                <option>Pilot Lamp</option>
+            <div class="mb-3">
+                <label class="form-label">Nama Komponen</label>
+                <select class="form-select" id="nama_barang" required>
+                    <option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
+                    <option ${data.nama_barang === 'MCB' ? 'selected' : ''}>MCB</option>
+                    <option ${data.nama_barang === 'MCCB' ? 'selected' : ''}>MCCB</option>
+                    <option ${data.nama_barang === 'Relay' ? 'selected' : ''}>Relay</option>
+                    <option ${data.nama_barang === 'Kontaktor' ? 'selected' : ''}>Kontaktor</option>
+                    <option ${data.nama_barang === 'Thermal' ? 'selected' : ''}>Thermal</option>
+                    <option ${data.nama_barang === 'Timer' ? 'selected' : ''}>Timer</option>
+                    <option ${data.nama_barang === 'Push Button' ? 'selected' : ''}>Push Button</option>
+                    <option ${data.nama_barang === 'Pilot Lamp' ? 'selected' : ''}>Pilot Lamp</option>
                 </select>
             </div>
-            <div class="mb-3"><label class="form-label">Merk</label><select class="form-select" id="merk" required><option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
-                <option>Autonics</option>
-                <option>Omron</option>
-                <option>Fuji Elektrik</option>
-                <option>GAE</option>
-                <option>ABB</option>
-                <option>LS</option>
-                <option>Schneider</option>
-                <option>Terasaki</option>
-                <option>Mitsubishi</option>
-                <option>IDEC</option>
+            <div class="mb-3">
+                <label class="form-label">Merk</label>
+                <select class="form-select" id="merk" required>
+                    <option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
+                    <option ${data.merk === 'Autonics' ? 'selected' : ''}>Autonics</option>
+                    <option ${data.merk === 'Omron' ? 'selected' : ''}>Omron</option>
+                    <option ${data.merk === 'Fuji Elektrik' ? 'selected' : ''}>Fuji Elektrik</option>
+                    <option ${data.merk === 'GAE' ? 'selected' : ''}>GAE</option>
+                    <option ${data.merk === 'ABB' ? 'selected' : ''}>ABB</option>
+                    <option ${data.merk === 'LS' ? 'selected' : ''}>LS</option>
+                    <option ${data.merk === 'Schneider' ? 'selected' : ''}>Schneider</option>
+                    <option ${data.merk === 'Terasaki' ? 'selected' : ''}>Terasaki</option>
+                    <option ${data.merk === 'Mitsubishi' ? 'selected' : ''}>Mitsubishi</option>
+                    <option ${data.merk === 'IDEC' ? 'selected' : ''}>IDEC</option>
                 </select>
             </div>
-            <div class="mb-3"><label class="form-label">Spesifikasi</label><textarea class="form-control" id="spesifikasi">${data.spesifikasi || ''}</textarea></div>
-            <div class="mb-3"><label class="form-label">Jumlah</label><input type="number" class="form-control" id="jumlah" value="${data.jumlah || ''}" required></div>
-            <div class="mb-3"><label class="form-label">Keterangan</label><select class="form-select" id="keterangan" required><option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
-                <option>Stock MME JKT</option>
-                <option>Stock MME SBY</option>
-                <option>MME JKT</option>
-                <option>MME SBY</option>
+            <div class="mb-3">
+                <label class="form-label">Spesifikasi</label>
+                <textarea class="form-control" id="spesifikasi">${sanitizeText(data.spesifikasi || '')}</textarea>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Jumlah</label>
+                <input type="number" class="form-control" id="jumlah" value="${data.jumlah || ''}" required min="0">
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Keterangan</label>
+                <select class="form-select" id="keterangan" required>
+                    <option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
+                    <option ${data.keterangan === 'Stock MME JKT' ? 'selected' : ''}>Stock MME JKT</option>
+                    <option ${data.keterangan === 'Stock MME SBY' ? 'selected' : ''}>Stock MME SBY</option>
+                    <option ${data.keterangan === 'MME JKT' ? 'selected' : ''}>MME JKT</option>
+                    <option ${data.keterangan === 'MME SBY' ? 'selected' : ''}>MME SBY</option>
                 </select>
             </div>`;
+        document.getElementById('itemModalLabel').textContent = isEdit ? 'Edit Stock Komponen' : 'Tambah Stock Komponen';
+        itemForm.innerHTML = formHtml;
     } else if (coll === 'material') {
-        // Keep existing material form logic (unchanged)
         formHtml += `
-            <div class="mb-3"><label class="form-label">Nama Material</label><input type="text" class="form-control" id="nama" value="${data.nama || ''}" required></div>
-            <div class="mb-3"><label class="form-label">Merk</label><input type="text" class="form-control" id="merk" value="${data.merk || ''}" required></div>
-            <div class="mb-3"><label class="form-label">Spesifikasi</label><textarea class="form-control" id="spesifikasi">${data.spesifikasi || ''}</textarea></div>
-            <div class="mb-3"><label class="form-label">Jumlah</label><input type="number" class="form-control" id="jumlah" value="${data.jumlah || ''}" required></div>
-            <div class="mb-3"><label class="form-label">Keterangan</label><input type="text" class="form-control" id="keterangan" value="${data.keterangan || ''}" required></div>`;
-    // --- GANTI bagian transaksi di dalam fungsi buildForm ---
-} else if (coll === 'transaksi') {
-    if (stage === 'select') {
-        // First Pop-Up: Stock Selection
-        let materialOptions = '';
-        let komponenOptions = '';
-        try {
-            const materialNames = await getDocs(collection(db, 'users', user.uid, 'material'));
-            materialOptions = materialNames.docs.map(doc => {
-                const data = doc.data();
-                return `<tr class="stock-item" data-collection="material" data-nama="${data.nama || ''}" data-merk="${data.merk || ''}" data-spesifikasi="${data.spesifikasi || ''}">
-                    <td>${data.nama || '-'}</td><td>${data.merk || '-'}</td><td>${data.spesifikasi || '-'}</td><td>${data.jumlah || 0}</td>
-                </tr>`;
-            }).join('');
+            <div class="mb-3">
+                <label class="form-label">Nama Material</label>
+                <input type="text" class="form-control" id="nama" value="${sanitizeText(data.nama || '')}" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Merk</label>
+                <input type="text" class="form-control" id="merk" value="${sanitizeText(data.merk || '')}" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Spesifikasi</label>
+                <textarea class="form-control" id="spesifikasi">${sanitizeText(data.spesifikasi || '')}</textarea>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Jumlah</label>
+                <input type="number" class="form-control" id="jumlah" value="${data.jumlah || ''}" required min="0">
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Keterangan</label>
+                <input type="text" class="form-control" id="keterangan" value="${sanitizeText(data.keterangan || '')}" required>
+            </div>`;
+        document.getElementById('itemModalLabel').textContent = isEdit ? 'Edit Stock Material' : 'Tambah Stock Material';
+        itemForm.innerHTML = formHtml;
+    } else if (coll === 'transaksi') {
+        if (stage === 'select') {
+            let materialTableBody = '';
+            let komponenTableBody = '';
+            try {
+                const materialSnapshot = await getDocs(collection(db, 'users', user.uid, 'material'));
+                materialTableBody = materialSnapshot.docs.map(doc => {
+                    const data = doc.data();
+                    const safeNama = sanitizeAttribute(data.nama || '');
+                    const safeMerk = sanitizeAttribute(data.merk || '');
+                    const safeSpesifikasi = sanitizeAttribute(data.spesifikasi || '');
+                    return `
+                        <tr>
+                            <td>${sanitizeText(data.nama || '-')}</td>
+                            <td>${sanitizeText(data.merk || '-')}</td>
+                            <td>${sanitizeText(data.spesifikasi || '-')}</td>
+                            <td>${data.jumlah || 0}</td>
+                            <td>
+                                <button class="btn btn-primary btn-sm btn-pilih"
+                                        data-collection="material"
+                                        data-nama="${safeNama}"
+                                        data-merk="${safeMerk}"
+                                        data-spesifikasi="${safeSpesifikasi}">Pilih</button>
+                            </td>
+                        </tr>`;
+                }).join('');
 
-            const komponenNames = await getDocs(collection(db, 'users', user.uid, 'komponen'));
-            komponenOptions = komponenNames.docs.map(doc => {
-                const data = doc.data();
-                return `<tr class="stock-item" data-collection="komponen" data-nama="${data.nama_barang || ''}" data-merk="${data.merk || ''}" data-spesifikasi="${data.spesifikasi || ''}">
-                    <td>${data.nama_barang || '-'}</td><td>${data.merk || '-'}</td><td>${data.spesifikasi || '-'}</td><td>${data.jumlah || 0}</td>
-                </tr>`;
-            }).join('');
-        } catch (error) {
-            console.error('Gagal mengambil data stok:', error);
-            formHtml = `<p class="text-danger">Gagal memuat daftar stok. Silakan coba lagi.</p>`;
-            itemForm.innerHTML = formHtml;
-            return;
-        }
+                const komponenSnapshot = await getDocs(collection(db, 'users', user.uid, 'komponen'));
+                komponenTableBody = komponenSnapshot.docs.map(doc => {
+                    const data = doc.data();
+                    const safeNama = sanitizeAttribute(data.nama_barang || '');
+                    const safeMerk = sanitizeAttribute(data.merk || '');
+                    const safeSpesifikasi = sanitizeAttribute(data.spesifikasi || '');
+                    return `
+                        <tr>
+                            <td>${sanitizeText(data.nama_barang || '-')}</td>
+                            <td>${sanitizeText(data.merk || '-')}</td>
+                            <td>${sanitizeText(data.spesifikasi || '-')}</td>
+                            <td>${data.jumlah || 0}</td>
+                            <td>
+                                <button class="btn btn-primary btn-sm btn-pilih"
+                                        data-collection="komponen"
+                                        data-nama="${safeNama}"
+                                        data-merk="${safeMerk}"
+                                        data-spesifikasi="${safeSpesifikasi}">Pilih</button>
+                            </td>
+                        </tr>`;
+                }).join('');
+            } catch (error) {
+                console.error('Gagal memuat stok:', error.message);
+                formHtml = `<p class="text-danger">Gagal memuat stok: ${error.message}</p>`;
+                itemForm.innerHTML = formHtml;
+                return;
+            }
 
-        if (!materialOptions && !komponenOptions) {
-            formHtml = `<p class="text-muted">Tidak ada stok material atau komponen tersedia.</p>`;
-        } else {
-            formHtml = `
-                <div class="table-responsive">
+            formHtml += `
+                <h6 class="mb-3">Stok Material</h6>
+                <div class="table mb-4">
                     <table class="table table-striped table-hover">
-                        <thead class="table-dark"><tr><th>Nama Barang</th><th>Merk</th><th>Spesifikasi</th><th>Jumlah</th></tr></thead>
-                        <tbody id="stock-list">${materialOptions}${komponenOptions}</tbody>
+                        <thead class="table-dark">
+                            <tr>
+                                <th>Nama</th>
+                                <th>Merk</th>
+                                <th>Spesifikasi</th>
+                                <th>Jumlah</th>
+                                <th>Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${materialTableBody || '<tr><td colspan="5" class="text-center">Tidak ada data.</td></tr>'}
+                        </tbody>
+                    </table>
+                </div>
+                <h6 class="mb-3">Stok Komponen</h6>
+                <div class="table">
+                    <table class="table table-striped table-hover">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>Nama Barang</th>
+                                <th>Merk</th>
+                                <th>Spesifikasi</th>
+                                <th>Jumlah</th>
+                                <th>Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${komponenTableBody || '<tr><td colspan="5" class="text-center">Tidak ada data.</td></tr>'}
+                        </tbody>
                     </table>
                 </div>`;
-        }
-        document.getElementById('itemModalLabel').textContent = 'Pilih Stock Barang';
-        itemForm.innerHTML = formHtml;
+            document.getElementById('itemModalLabel').textContent = 'Pilih Stock Barang';
+            itemForm.innerHTML = formHtml;
 
-        // Add click handler for stock selection
-        document.querySelectorAll('.stock-item').forEach(item => {
-            item.addEventListener('click', () => {
-                const selectedData = {
-                    jenis: item.dataset.collection,
-                    nama_barang: item.dataset.nama,
-                    merk: item.dataset.merk,
-                    spesifikasi: item.dataset.spesifikasi
-                };
-                buildForm(selectedData, 'transaksi', 'details');
+            const modalDialog = document.querySelector('#itemModal .modal-dialog');
+            const modalFooter = document.querySelector('#itemModal .modal-footer');
+            modalDialog.classList.add('modal-lg');
+            modalFooter.style.display = 'none';
+
+            document.addEventListener('click', function handlePilihClick(e) {
+                const button = e.target.closest('.btn-pilih');
+                if (button) {
+                    const selectedData = {
+                        jenis: button.dataset.collection,
+                        nama_barang: button.dataset.nama,
+                        merk: button.dataset.merk,
+                        spesifikasi: button.dataset.spesifikasi
+                    };
+                    buildForm(selectedData, 'transaksi', 'details');
+                    modalDialog.classList.remove('modal-lg');
+                    modalFooter.style.display = '';
+                    document.removeEventListener('click', handlePilihClick);
+                }
             });
-        });
-    } else if (stage === 'details') {
-        // Second Pop-Up: Transaction Details
-        formHtml += `
-            <div class="mb-3"><label class="form-label">Jenis</label><input type="text" class="form-control" id="jenis" value="${data.jenis || ''}" readonly></div>
-            <div class="mb-3"><label class="form-label">Nama Barang</label><input type="text" class="form-control" id="nama_barang" value="${data.nama_barang || ''}" readonly></div>
-            <div class="mb-3"><label class="form-label">Merk</label><input type="text" class="form-control" id="merk" value="${data.merk || ''}" readonly></div>
-            <div class="mb-3"><label class="form-label">Spesifikasi</label><textarea class="form-control" id="spesifikasi" readonly>${data.spesifikasi || ''}</textarea></div>
-            <div class="mb-3"><label class="form-label">Jumlah</label><input type="number" class="form-control" id="jumlah" value="${data.jumlah || ''}" required min="1"></div>
-            <div class="mb-3"><label class="form-label">Keluar/Masuk</label><select class="form-select" id="transaksi" required>
-                <option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
-                <option value="masuk">Masuk</option>
-                <option value="keluar">Keluar</option>
-            </select></div>
-            <div class="mb-3"><label class="form-label">Keterangan</label><select class="form-select" id="keterangan" required>
-                <option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
-                <option value="permanen">Permanen</option>
-                <option value="temporary">Temporary</option>
-            </select></div>
-            <div class="mb-3 d-none" id="tanggal-kembali-group"><label class="form-label">Tanggal Kembali</label><input type="date" class="form-control" id="tanggal_kembali" value="${data.tanggal_kembali || ''}"></div>`;
-        document.getElementById('itemModalLabel').textContent = 'Tambah Transaksi Keluar Masuk';
-        itemForm.innerHTML = formHtml;
+        } else if (stage === 'details') {
+            formHtml += `
+                <div class="mb-3">
+                    <label class="form-label">Jenis</label>
+                    <input type="text" class="form-control" id="jenis" value="${sanitizeText(data.jenis || '')}" readonly>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Nama Barang</label>
+                    <input type="text" class="form-control" id="nama_barang" value="${sanitizeText(data.nama_barang || '')}" readonly>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Merk</label>
+                    <input type="text" class="form-control" id="merk" value="${sanitizeText(data.merk || '')}" readonly>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Spesifikasi</label>
+                    <textarea class="form-control" id="spesifikasi" readonly>${sanitizeText(data.spesifikasi || '')}</textarea>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Jumlah</label>
+                    <input type="number" class="form-control" id="jumlah" value="${data.jumlah || ''}" required min="1">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Keluar/Tambah</label>
+                    <select class="form-select" id="transaksi" required>
+                        <option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
+                        <option value="masuk">Tambah</option>
+                        <option value="keluar">Keluar</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Keterangan</label>
+                    <select class="form-select" id="keterangan" required>
+                        <option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
+                        <option value="permanen">Permanen</option>
+                        <option value="temporary" class="keterangan-temporary d-none">Temporary</option>
+                    </select>
+                </div>
+                <div class="mb-3 d-none" id="tanggal-kembali-group">
+                    <label class="form-label">Tanggal Kembali</label>
+                    <input type="date" class="form-control" id="tanggal_kembali" value="${sanitizeText(data.tanggal_kembali || '')}">
+                </div>`;
+            document.getElementById('itemModalLabel').textContent = 'Tambah Transaksi Keluar Masuk';
+            itemForm.innerHTML = formHtml;
 
-        // Show/hide Tanggal Kembali based on Keterangan
-        const keteranganSelect = document.getElementById('keterangan');
-        const tanggalKembaliGroup = document.getElementById('tanggal-kembali-group');
-        keteranganSelect.addEventListener('change', () => {
-            if (keteranganSelect.value === 'temporary') {
-                tanggalKembaliGroup.classList.remove('d-none');
-                document.getElementById('tanggal_kembali').required = true;
-            } else {
-                tanggalKembaliGroup.classList.add('d-none');
-                document.getElementById('tanggal_kembali').required = false;
-            }
-        });
-    }
-}
-    itemForm.innerHTML = formHtml;
-}
+            const transaksiSelect = document.getElementById('transaksi');
+            const keteranganSelect = document.getElementById('keterangan');
+            const temporaryOption = keteranganSelect.querySelector('.keterangan-temporary');
+            const tanggalKembaliGroup = document.getElementById('tanggal-kembali-group');
 
-    function renderTableData(headers) {
-        const tableBody = document.getElementById('table-body');
-        const dataKeys = {
-            'material': ['nama', 'merk', 'spesifikasi', 'jumlah', 'keterangan'],
-            'komponen': ['nama_barang', 'merk', 'spesifikasi', 'jumlah', 'keterangan']
-        }[currentCollectionName];
-
-        const q = query(collection(db, 'users', user.uid, currentCollectionName));
-        onSnapshot(q, (snapshot) => {
-            tableBody.innerHTML = '';
-            if (snapshot.empty) { tableBody.innerHTML = `<tr><td colspan="${headers.length + 2}" class="text-center">Tidak ada data.</td></tr>`; return; }
-            let index = 1;
-            snapshot.forEach(doc => {
-                const data = doc.data();
-                let rowHtml = `<td>${index++}</td>`;
-                dataKeys.forEach(key => rowHtml += `<td>${data[key] || ''}</td>`);
-                rowHtml += `<td><button class="btn btn-warning btn-sm btn-edit" data-id="${doc.id}"><i class="bi bi-pencil-square"></i></button> <button class="btn btn-danger btn-sm btn-delete" data-id="${doc.id}"><i class="bi bi-trash"></i></button></td>`;
-                tableBody.innerHTML += `<tr>${rowHtml}</tr>`;
-            });
-        });
-    }
-
-    function renderTemporaryKeluarTable() {
-        const tableBody = document.getElementById('table-body');
-        const q = query(collection(db, 'users', user.uid, 'keluar'), orderBy('tanggal_keluar', 'desc'));
-        onSnapshot(q, (snapshot) => {
-            tableBody.innerHTML = '';
-            if (snapshot.empty) { tableBody.innerHTML = `<tr><td colspan="7" class="text-center">Tidak ada data.</td></tr>`; return; }
-            let index = 1;
-            snapshot.forEach(doc => {
-                const data = doc.data();
-                const returnStatus = data.returned ? `Sudah Dikembalikan: ${data.tanggal_kembali_actual || '-'}` : `<button class="btn btn-success btn-sm btn-return" data-id="${doc.id}"><i class="bi bi-check-circle"></i> Kembalikan</button>`;
-                const rowHtml = `
-                    <td>${index++}</td>
-                    <td>${data.jenis || ''}</td>
-                    <td>${data.nama_barang || ''}</td>
-                    <td>${data.merk || ''}</td>
-                    <td>${data.spesifikasi || ''}</td>
-                    <td>${data.jumlah || 0}</td>
-                    <td>${data.tanggal_keluar || ''}</td>
-                    <td>${returnStatus}</td>`;
-                tableBody.innerHTML += `<tr>${rowHtml}</tr>`;
-            });
-        });
-    }
-
-    function renderKeluarMasukTable() {
-        const tableBody = document.getElementById('table-body');
-        const q = query(collection(db, 'users', user.uid, 'transaksi'), orderBy('tanggal_keluar', 'desc'));
-        onSnapshot(q, (snapshot) => {
-            tableBody.innerHTML = '';
-            if (snapshot.empty) { tableBody.innerHTML = `<tr><td colspan="9" class="text-center">Tidak ada data.</td></tr>`; return; }
-            let index = 1;
-            snapshot.forEach(doc => {
-                const data = doc.data();
-                const rowHtml = `
-                    <td>${index++}</td>
-                    <td>${data.jenis || ''}</td>
-                    <td>${data.nama_barang || ''}</td>
-                    <td>${data.merk || ''}</td>
-                    <td>${data.spesifikasi || ''}</td>
-                    <td>${data.jumlah || 0}</td>
-                    <td>${data.tanggal_keluar || ''}</td>
-                    <td>${data.transaksi || ''}</td>
-                    <td>${data.keterangan || ''}</td>
-                    <td><button class="btn btn-warning btn-sm btn-edit" data-id="${doc.id}" data-collection="transaksi"><i class="bi bi-pencil-square"></i></button> <button class="btn btn-danger btn-sm btn-delete" data-id="${doc.id}" data-collection="transaksi"><i class="bi bi-trash"></i></button></td>`;
-                tableBody.innerHTML += `<tr>${rowHtml}</tr>`;
-            });
-        });
-    }
-
-    function renderLogs() {
-        const logContainer = document.querySelector('#log-container ul');
-        if (!logContainer) return;
-        const q = query(collection(db, 'users', user.uid, 'logs'), orderBy('timestamp', 'desc'));
-        onSnapshot(q, (snapshot) => {
-            const filteredLogs = snapshot.docs.filter(doc => doc.data().collection === currentCollectionName);
-            if (filteredLogs.length === 0) { logContainer.innerHTML = '<li class="list-group-item text-muted text-center">Belum ada aktivitas untuk kategori ini.</li>'; return; }
-            let logHtml = '';
-            filteredLogs.forEach(doc => {
-                const log = doc.data();
-                const details = log.details || {};
-                const docName = details.nama || details.nama_barang || "Item";
-                const itemDetails = ` (Merk: ${details.merk || '-'}, Spek: ${details.spesifikasi || '-'}, Jml: ${details.jumlah || 0}, Ket: ${details.keterangan || '-'})`;
-                const date = log.timestamp?.toDate().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }) || 'Baru saja';
-                logHtml += `<li class="list-group-item">[${date}] Item <strong>${docName}</strong> telah <strong>${log.action}</strong>.${itemDetails}</li>`;
-            });
-            logContainer.innerHTML = logHtml;
-        });
-    }
-
-    async function generateReport() {
-        const collections = [];
-        if (document.getElementById('report-stock').checked) collections.push('material', 'komponen');
-        if (document.getElementById('report-keluar').checked) collections.push('keluar');
-        if (document.getElementById('report-masuk').checked) collections.push('transaksi');
-
-        const startDate = document.getElementById('start-date').value;
-        const endDate = document.getElementById('end-date').value;
-
-        const docDefinition = {
-            pageSize: 'A4',
-            content: [
-                { text: 'Laporan Inventaris', style: 'header' },
-                { text: `Tanggal: ${startDate ? new Date(startDate).toLocaleDateString('id-ID') : 'Semua'} - ${endDate ? new Date(endDate).toLocaleDateString('id-ID') : 'Semua'}`, style: 'subheader' }
-            ],
-            styles: {
-                header: { fontSize: 18, bold: true, margin: [0, 0, 0, 10], font: 'Times' },
-                subheader: { fontSize: 12, margin: [0, 0, 0, 20], font: 'Times' },
-                tableHeader: { bold: true, fontSize: 12, color: 'black', font: 'Times' },
-                tableBody: { fontSize: 12, font: 'Times' }
-            },
-            defaultStyle: { font: 'Times', fontSize: 12 }
-        };
-
-        for (const coll of collections) {
-            let q = query(collection(db, 'users', user.uid, coll));
-            if (startDate && (coll === 'keluar' || coll === 'transaksi')) q = query(q, where('tanggal_keluar', '>=', startDate));
-            if (endDate && (coll === 'keluar' || coll === 'transaksi')) q = query(q, where('tanggal_keluar', '<=', endDate));
-            
-            const snapshot = await getDocs(q);
-            const tableBody = [];
-            snapshot.forEach(doc => {
-                const data = doc.data();
-                if (coll === 'material') {
-                    tableBody.push([data.nama || '-', data.merk || '-', data.spesifikasi || '-', data.jumlah || 0, data.keterangan || '-']);
-                } else if (coll === 'komponen') {
-                    tableBody.push([data.nama_barang || '-', data.merk || '-', data.spesifikasi || '-', data.jumlah || 0, data.keterangan || '-']);
-                } else if (coll === 'keluar') {
-                    tableBody.push([data.jenis || '-', data.nama_barang || '-', data.merk || '-', data.spesifikasi || '-', data.jumlah || 0, data.tanggal_keluar || '-', data.returned ? `Sudah Dikembalikan: ${data.tanggal_kembali_actual || '-'}` : 'Belum Dikembalikan']);
-                } else if (coll === 'transaksi') {
-                    tableBody.push([data.jenis || '-', data.nama_barang || '-', data.merk || '-', data.spesifikasi || '-', data.jumlah || 0, data.tanggal_keluar || '-', data.transaksi || '-', data.keterangan || '-']);
+            transaksiSelect.addEventListener('change', () => {
+                if (transaksiSelect.value === 'keluar') {
+                    temporaryOption.classList.remove('d-none');
+                } else {
+                    temporaryOption.classList.add('d-none');
+                    if (keteranganSelect.value === 'temporary') {
+                        keteranganSelect.value = '';
+                    }
+                    tanggalKembaliGroup.classList.add('d-none');
+                    document.getElementById('tanggal_kembali').required = false;
                 }
             });
 
-            if (coll === 'material' || coll === 'komponen') {
-                if (collections.includes('material') && collections.includes('komponen') && coll === 'material') {
-                    docDefinition.content.push(
-                        { text: 'Stock Terbaru', style: 'subheader' },
-                        {
-                            table: {
-                                headerRows: 1,
-                                widths: ['*', '*', '*', 'auto', '*'],
-                                body: [
-                                    ['Nama Barang', 'Merk', 'Spesifikasi', 'Jumlah', 'Keterangan'],
-                                    ...tableBody
-                                ]
-                            },
-                            layout: 'lightHorizontalLines',
-                            style: 'tableBody'
-                        }
-                    );
-                } else if (!collections.includes('material') && coll === 'komponen') {
-                    docDefinition.content.push(
-                        { text: 'Stock Terbaru', style: 'subheader' },
-                        {
-                            table: {
-                                headerRows: 1,
-                                widths: ['*', '*', '*', 'auto', '*'],
-                                body: [
-                                    ['Nama Barang', 'Merk', 'Spesifikasi', 'Jumlah', 'Keterangan'],
-                                    ...tableBody
-                                ]
-                            },
-                            layout: 'lightHorizontalLines',
-                            style: 'tableBody'
-                        }
-                    );
+            keteranganSelect.addEventListener('change', () => {
+                if (keteranganSelect.value === 'temporary') {
+                    tanggalKembaliGroup.classList.remove('d-none');
+                    document.getElementById('tanggal_kembali').required = true;
+                } else {
+                    tanggalKembaliGroup.classList.add('d-none');
+                    document.getElementById('tanggal_kembali').required = false;
                 }
-            } else {
-                docDefinition.content.push(
-                    { text: coll === 'keluar' ? 'Barang Keluar' : 'Barang Masuk', style: 'subheader' },
-                    {
-                        table: {
-                            headerRows: 1,
-                            widths: coll === 'keluar' ? ['auto', '*', '*', '*', 'auto', 'auto', '*'] : ['auto', '*', '*', '*', 'auto', 'auto', 'auto', '*'],
-                            body: [
-                                coll === 'keluar'
-                                    ? ['Jenis', 'Nama Barang', 'Merk', 'Spesifikasi', 'Jumlah', 'Tanggal Keluar', 'Keterangan']
-                                    : ['Jenis', 'Nama Barang', 'Merk', 'Spesifikasi', 'Jumlah', 'Tanggal Keluar', 'Transaksi', 'Keterangan'],
-                                ...tableBody
-                            ]
-                        },
-                        layout: 'lightHorizontalLines',
-                        style: 'tableBody'
-                    },
-                    { text: '', margin: [0, 20, 0, 0] }
-                );
-            }
-        }
-
-        if (collections.includes('komponen') && collections.includes('material')) {
-            const komponenSnapshot = await getDocs(collection(db, 'users', user.uid, 'komponen'));
-            const additionalBody = [];
-            komponenSnapshot.forEach(doc => {
-                const data = doc.data();
-                additionalBody.push([data.nama_barang || '-', data.merk || '-', data.spesifikasi || '-', data.jumlah || 0, data.keterangan || '-']);
             });
-            if (docDefinition.content.some(item => item.text === 'Stock Terbaru')) {
-                docDefinition.content.find(item => typeof item === 'object' && item.table && item.table.body[0][0] === 'Nama Barang').table.body.push(...additionalBody);
-            }
-        }
-
-        pdfMake.createPdf(docDefinition).download('Laporan_Inventaris.pdf');
-    }
-
-    itemForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const docId = document.getElementById('itemId').value;
-    let data = {};
-    itemForm.querySelectorAll('input, select, textarea').forEach(el => { if(el.id) data[el.id] = (el.type === 'number') ? Number(el.value) : el.value; });
-    delete data.itemId;
-
-    if (currentCollectionName === 'transaksi') {
-        const coll = data.jenis.toLowerCase();
-        const stockRef = doc(db, 'users', user.uid, coll, data.nama_barang);
-        const stockSnap = await getDoc(stockRef);
-        let newStock = stockSnap.exists() ? stockSnap.data().jumlah || 0 : 0;
-
-        // Update stock immediately
-        if (data.transaksi === 'masuk') {
-            newStock += data.jumlah;
-        } else if (data.transaksi === 'keluar') {
-            newStock = Math.max(0, newStock - data.jumlah);
-        }
-
-        // Update or create stock document
-        if (stockSnap.exists()) {
-            await updateDoc(stockRef, { jumlah: newStock });
-        } else {
-            await addDoc(collection(db, 'users', user.uid, coll), {
-                nama: coll === 'material' ? data.nama_barang : undefined,
-                nama_barang: coll === 'komponen' ? data.nama_barang : undefined,
-                merk: data.merk,
-                spesifikasi: data.spesifikasi,
-                jumlah: newStock,
-                keterangan: data.keterangan
-            });
-        }
-
-        // Handle temporary transactions
-        if (data.keterangan === 'temporary') {
-            await addDoc(collection(db, 'users', user.uid, 'keluar'), {
-                jenis: data.jenis,
-                nama_barang: data.nama_barang,
-                merk: data.merk,
-                spesifikasi: data.spesifikasi,
-                jumlah: data.jumlah,
-                tanggal_keluar: new Date().toISOString().split('T')[0],
-                tanggal_kembali: data.tanggal_kembali || null,
-                returned: false
-            });
-        }
-
-        // Save transaction
-        data.tanggal_keluar = new Date().toISOString().split('T')[0];
-        if (docId) {
-            await updateDoc(doc(db, 'users', user.uid, 'transaksi', docId), data);
-            writeLog('Diperbarui', 'transaksi', data);
-        } else {
-            await addDoc(collection(db, 'users', user.uid, 'transaksi'), data);
-            writeLog('Ditambahkan', 'transaksi', data);
-        }
-    } else {
-        // Keep existing logic for material and komponen
-        if (docId) {
-            await updateDoc(doc(db, 'users', user.uid, currentCollectionName, docId), data);
-            writeLog('Diperbarui', currentCollectionName, data);
-        } else {
-            await addDoc(collection(db, 'users', user.uid, currentCollectionName), data);
-            writeLog('Ditambahkan', currentCollectionName, data);
         }
     }
-    itemModal.hide();
-});
+}
 
-    // Halaman awal saat dimuat
-    navigate('dashboard');
+async function writeLog(action, collectionName, data) {
+    try {
+        await addDoc(collection(db, 'users', user.uid, 'logs'), {
+            action,
+            collection: collectionName,
+            details: data,
+            user: user.email,
+            timestamp: serverTimestamp()
+        });
+    } catch (error) {
+        console.error('Gagal menulis log:', error.message);
+    }
+}
+
+function sanitizeAttribute(value) {
+    if (value == null) return '';
+    return String(value)
+        .replace(/&/g, '&')
+        .replace(/"/g, '"')
+        .replace(/'/g, '')
+        .replace(/</g, '<')
+        .replace(/>/g, '>');
+}
+
+function sanitizeText(value) {
+    if (value == null) return '';
+    const div = document.createElement('div');
+    div.textContent = String(value);
+    return div.innerHTML;
 }

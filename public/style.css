@@ -136,3 +136,25 @@ body.sidebar-minimized .sidebar .nav-link { justify-content: center; }
     max-width: 400px;
     margin-bottom: 20px;
 }
+.dashboard-card {
+    min-height: 180px; /* Ensure uniform height */
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+.log-search {
+    width: auto;
+    max-width: 200px;
+}
+.table-responsive {
+    overflow-x: auto;
+    width: 100%;
+}
+.table-responsive table {
+    min-width: 1000px; /* Adjust based on your table’s content */
+}
+.table-responsive th,
+.table-responsive td {
+    min-width: 120px; /* Prevent columns from shrinking too much */
+    white-space: nowrap; /* Prevent text wrapping */
+}
