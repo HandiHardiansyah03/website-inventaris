@@ -67,9 +67,9 @@
                 <button id="sidebar-toggle" class="btn btn-outline-secondary"><i class="bi bi-list"></i></button>
                 <div class="d-flex align-items-center">
                     <img id="header-user-avatar" src="https://placehold.co/32x32/0d6efd/white?text=U" alt="User Avatar" class="rounded-circle me-2">
-                    <span id="header-user-name">Memuat...</span>
-                    <button type="button" class="btn btn-light ms-2">
-                        <a class="nav-link" href="#" data-page="logout"><i class="bi bi-box-arrow-left"></i><span class="menu-text ms-2">LOGOUT</span></a>
+                    <b><span id="header-user-name">Memuat...</span></b>
+                    <button class="btn btn-light ms-3">
+                        <a class="nav-link btn-logout" href="#" data-page="logout"><i class="bi bi-box-arrow-left"></i><span class="menu-text ms-2">LOGOUT</span></a>
                     </button>
                 </div>
             </div>
@@ -89,7 +89,7 @@
                     <form id="itemForm"></form>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Batal</button>
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Batal</button>
                     <button type="submit" form="itemForm" class="btn btn-primary">Simpan</button>
                 </div>
             </div>
@@ -98,7 +98,7 @@
 
     <!-- Confirm Action Modal -->
     <div class="modal fade" id="confirmActionModal" tabindex="-1">
-        <div class="modal-dialog modal-sm">
+        <div class="modal-dialog modal-md">
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title" id="confirmActionTitle"></h5>
@@ -106,8 +106,8 @@
                 </div>
                 <div class="modal-body" id="confirmActionBody"></div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Batal</button>
-                    <button type="button" class="btn btn-primary" id="confirmActionBtn">Ya, Lanjutkan</button>
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Batal</button>
+                    <button type="button" class="btn btn-danger" id="confirmActionBtn">Ya, Lanjutkan</button>
                 </div>
             </div>
         </div>

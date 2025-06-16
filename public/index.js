@@ -650,17 +650,15 @@ async function loadKeluarMasukPage() {
                 <li class="breadcrumb-item active">Keluar Masuk</li>
             </ol>
         </nav>
-        <div class="card mb-4">
-            <div class="card-header bg-white d-flex justify-content-start align-items-center">
-                <button class="btn btn-primary btn-lg btn-tambah"><i class="bi bi-plus-circle me-2"></i>Tambah Keluar Masuk</button>
-            </div>
-        </div>
+        
+        <button class="btn btn-primary btn-lg btn-tambah mt-2 mb-4"><i class="bi bi-plus-circle me-2"></i>Tambah Keluar Masuk</button>
+        
         <div class="card">
             <div class="card-header bg-white d-flex justify-content-between align-items-center">
                 <h5>Riwayat Aktivitas Keluar Masuk</h5>
                 <div>
                     <button class="btn btn-outline-secondary btn-sm clear-log-btn ms-2" data-collection="transaksi"><i class="bi bi-trash me-1"></i>Bersihkan</button>
-                    <input type="text" class="form-control d-inline-block log-search" id="search-transaksi" placeholder="Cari...">
+                    <input type="text" class="form-control d-inline-block log-search ms-2" id="search-transaksi" placeholder="Cari...">
                 </div>
             </div>
             <div class="card-body">
@@ -787,7 +785,7 @@ async function loadBarangKeluarTemporaryPage() {
                 <h5>Riwayat Aktivitas Barang Temporary</h5>
                 <div>
                     <button class="btn btn-outline-secondary btn-sm clear-log-btn ms-2" data-collection="keluar"><i class="bi bi-trash me-1"></i>Bersihkan</button>
-                    <input type="text" class="form-control d-inline-block log-search" id="log-search" placeholder="Cari...">
+                    <input type="text" class="form-control d-inline-block log-search ms-2" id="log-search" placeholder="Cari...">
                 </div>
             </div>
             <div class="card-body p-3 scrollable-container">
@@ -1255,7 +1253,7 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
                     <table class="table table-striped table-hover">
                         <thead class="table-dark">
                             <tr>
-                                <th>Nama</th>
+                                <th>Nama Material</th>
                                 <th>Merk</th>
                                 <th>Spesifikasi</th>
                                 <th>Jumlah</th>
@@ -1272,7 +1270,7 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
                     <table class="table table-striped table-hover">
                         <thead class="table-dark">
                             <tr>
-                                <th>Nama Barang</th>
+                                <th>Nama Komponen</th>
                                 <th>Merk</th>
                                 <th>Spesifikasi</th>
                                 <th>Jumlah</th>
