@@ -24,6 +24,9 @@ const itemModal = new bootstrap.Modal(document.getElementById('itemModal'));
 const confirmActionModal = new bootstrap.Modal(document.getElementById('confirmActionModal'));
 const { jsPDF } = window.jspdf;
 
+// Variable untuk menyimpan info aksi yang akan dikonfirmasi
+let currentActionInfo = { action: null, docId: null, collection: null };
+
 onAuthStateChanged(auth, (currentUser) => {
     if (currentUser) {
         user = currentUser;
@@ -58,20 +61,17 @@ function initializeAppLogic() {
         document.body.classList.toggle('sidebar-minimized');
     });
 
-    // Add notification modal HTML to the document body
     const notificationModalHtml = `
         <div class="modal fade" id="dueNotificationModal" tabindex="-1" aria-labelledby="dueNotificationModalLabel" aria-hidden="true">
             <div class="modal-dialog">
                 <div class="modal-content">
                     <div class="modal-header">
                         <h5 class="modal-title" id="dueNotificationModalLabel">Pengingat Pengembalian Barang</h5>
-                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                     </div>
                     <div class="modal-body" id="dueNotificationBody">
                         <!-- Item list will be populated here -->
                     </div>
                     <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Tutup</button>
                         <button type="button" class="btn btn-primary" id="viewDueItemsBtn">Lihat Barang Keluar</button>
                     </div>
                 </div>
@@ -80,33 +80,31 @@ function initializeAppLogic() {
     document.body.insertAdjacentHTML('beforeend', notificationModalHtml);
     const dueNotificationModal = new bootstrap.Modal(document.getElementById('dueNotificationModal'));
 
-    // Function to check for items due today and show notification
-    const checkDueToday = async () => {
+    const checkDueAndOverdue = async () => {
         const today = new Date().toISOString().split('T')[0];
         const q = query(
             collection(db, 'users', user.uid, 'keluar'),
-            where('tanggal_kembali', '==', today)
+            where('tanggal_kembali', '<=', today)
         );
         try {
             const snapshot = await getDocs(q);
             if (snapshot.docs.length > 0) {
                 const items = snapshot.docs.map(doc => {
                     const data = doc.data();
-                    return `<li>${sanitizeText(data.nama_barang || '-')} (${sanitizeText(data.jenis || '-')}, Merk: ${sanitizeText(data.merk || '-')}, Jumlah: ${data.jumlah || 0})</li>`;
+                    const status = data.tanggal_kembali === today ? 'jatuh tempo hari ini' : 'telah lewat jatuh tempo';
+                    return `<li>${sanitizeText(data.nama_barang || '-')} (${sanitizeText(data.jenis || '-')}, Merk: ${sanitizeText(data.merk || '-')}, Jumlah: ${data.jumlah || 0}) - ${status}</li>`;
                 }).join('');
-                document.getElementById('dueNotificationBody').innerHTML = `<p>Barang berikut harus dikembalikan hari ini:</p><ul>${items}</ul>`;
+                document.getElementById('dueNotificationBody').innerHTML = `<p>Barang berikut harus dikembalikan:</p><ul>${items}</ul>`;
                 dueNotificationModal.show();
             }
         } catch (error) {
-            console.error('Gagal memeriksa barang yang harus dikembalikan hari ini:', error.message);
+            console.error('Gagal memeriksa barang yang harus dikembalikan:', error.message);
         }
     };
 
-    // Run checkDueToday immediately and then every 1 minute
-    checkDueToday();
-    const notificationInterval = setInterval(checkDueToday, 60 * 1000);
+    checkDueAndOverdue();
+    const notificationInterval = setInterval(checkDueAndOverdue, 60 * 1000);
 
-    // Add event listener for navigation button in notification modal
     document.getElementById('viewDueItemsBtn').addEventListener('click', () => {
         dueNotificationModal.hide();
         navigate('barang-keluar-temporary');
@@ -143,7 +141,9 @@ function initializeAppLogic() {
                 alert('Gagal memuat data: ' + error.message);
             }
         } else if (target.matches('.btn-delete')) {
-            currentActionInfo = { action: 'delete', docId: target.dataset.id, collection: target.dataset.collection || currentCollectionName };
+            const docId = target.dataset.id;
+            const collectionName = target.dataset.collection || currentCollectionName;
+            currentActionInfo = { action: 'delete', docId, collection: collectionName };
             document.getElementById('confirmActionTitle').textContent = 'Konfirmasi Hapus';
             document.getElementById('confirmActionBody').textContent = 'Yakin ingin menghapus data ini?';
             confirmActionModal.show();
@@ -202,6 +202,7 @@ function initializeAppLogic() {
             document.getElementById('confirmActionBody').textContent = 'Yakin ingin menghapus semua riwayat aktivitas?';
             confirmActionModal.show();
         } else if (target.matches('#download-report-btn')) {
+            e.preventDefault(); // Prevent multiple triggers
             const startDate = document.getElementById('start-date').value;
             const endDate = document.getElementById('end-date').value;
             const includeStock = document.getElementById('report-stock').checked;
@@ -323,32 +324,43 @@ function initializeAppLogic() {
         }
     });
 
-    let currentActionInfo = { action: null, docId: null, collection: null };
     document.getElementById('confirmActionBtn').addEventListener('click', async () => {
-        const { action, docId, collection } = currentActionInfo;
+        const { action, docId, collection: collectionName } = currentActionInfo;
         try {
             if (action === 'logout') {
                 await signOut(auth);
             } else if (action === 'delete') {
-                await deleteDoc(doc(db, 'users', user.uid, collection, docId));
-                await writeLog('hapus', collection, { id: docId });
+                const docRef = doc(db, 'users', user.uid, collectionName, docId);
+                const docSnap = await getDoc(docRef);
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    await deleteDoc(docRef);
+                    await writeLog('hapus', collectionName, data);
+                }
+                confirmActionModal.hide();
+                if (collectionName === 'transaksi') {
+                    loadKeluarMasukPage();
+                } else if (collectionName === 'keluar') {
+                    loadBarangKeluarTemporaryPage();
+                } else {
+                    loadDataTablePage();
+                }
             } else if (action === 'clear_logs') {
                 const logsSnapshot = await getDocs(query(
                     collection(db, 'users', user.uid, 'logs'),
-                    where('collection', '==', collection)
+                    where('collection', '==', collectionName)
                 ));
                 const batch = writeBatch(db);
                 logsSnapshot.forEach(doc => batch.delete(doc.ref));
                 await batch.commit();
-            }
-            confirmActionModal.hide();
-            if (action === 'delete' || action === 'clear_logs') {
-                if (collection === 'transaksi') {
-                    loadKeluarMasukPage();
-                } else if (collection === 'keluar') {
-                    loadBarangKeluarTemporaryPage();
-                } else {
+                confirmActionModal.hide();
+
+                if (collectionName === 'material' || collectionName === 'komponen') {
                     loadDataTablePage();
+                } else if (collectionName === 'transaksi') {
+                    loadKeluarMasukPage();
+                } else if (collectionName === 'keluar') {
+                    loadBarangKeluarTemporaryPage();
                 }
             }
         } catch (error) {
@@ -359,12 +371,17 @@ function initializeAppLogic() {
 
     navigate(currentPage);
 
-    // Return cleanup function to clear interval
     return () => clearInterval(notificationInterval);
 }
 
 function navigate(page) {
     currentPage = page;
+    document.querySelectorAll('#main-nav .nav-link').forEach(link => {
+        link.classList.remove('active');
+        if (link.dataset.page === page) {
+            link.classList.add('active');
+        }
+    });
     if (page === 'dashboard') {
         loadDashboardPage();
     } else if (page === 'material' || page === 'komponen') {
@@ -451,14 +468,22 @@ async function loadDashboardPage() {
         const materialSnapshot = await getDocs(query(collection(db, 'users', user.uid, 'material')));
         const totalMaterial = materialSnapshot.docs.reduce((sum, doc) => sum + (doc.data().jumlah || 0), 0);
         const totalMaterialJenis = materialSnapshot.docs.length;
-        document.getElementById('totalMaterial').textContent = `${totalMaterial} unit`;
-        document.getElementById('totalMaterialJenis').textContent = `${totalMaterialJenis} jenis`;
+        const totalMaterialEl = document.getElementById('totalMaterial');
+        const totalMaterialJenisEl = document.getElementById('totalMaterialJenis');
+        if (totalMaterialEl && totalMaterialJenisEl) {
+            totalMaterialEl.textContent = `${totalMaterial} unit`;
+            totalMaterialJenisEl.textContent = `${totalMaterialJenis} jenis barang`;
+        }
 
         const komponenSnapshot = await getDocs(query(collection(db, 'users', user.uid, 'komponen')));
         const totalKomponen = komponenSnapshot.docs.reduce((sum, doc) => sum + (doc.data().jumlah || 0), 0);
         const totalKomponenJenis = komponenSnapshot.docs.length;
-        document.getElementById('totalKomponen').textContent = `${totalKomponen} unit`;
-        document.getElementById('totalKomponenJenis').textContent = `${totalKomponenJenis} jenis`;
+        const totalKomponenEl = document.getElementById('totalKomponen');
+        const totalKomponenJenisEl = document.getElementById('totalKomponenJenis');
+        if (totalKomponenEl && totalKomponenJenisEl) {
+            totalKomponenEl.textContent = `${totalKomponen} unit`;
+            totalKomponenJenisEl.textContent = `${totalKomponenJenis} jenis barang`;
+        }
 
         const transaksiSnapshot = await getDocs(query(
             collection(db, 'users', user.uid, 'transaksi'),
@@ -468,36 +493,39 @@ async function loadDashboardPage() {
         const recentTransaksi = transaksiSnapshot.docs.length === 0
             ? 'Tidak ada transaksi'
             : `${transaksiSnapshot.docs[0].data().nama_barang} (${transaksiSnapshot.docs[0].data().transaksi}, ${transaksiSnapshot.docs[0].data().jumlah} unit)`;
-        document.getElementById('recentTransaksi').textContent = recentTransaksi;
+        const recentTransaksiEl = document.getElementById('recentTransaksi');
+        if (recentTransaksiEl) recentTransaksiEl.textContent = recentTransaksi;
 
         const keluarSnapshot = await getDocs(query(collection(db, 'users', user.uid, 'keluar')));
         const totalKeluarTemporary = keluarSnapshot.docs.reduce((sum, doc) => sum + (doc.data().jumlah || 0), 0);
-        document.getElementById('temporaryKeluar').textContent = `${totalKeluarTemporary} unit`;
+        const temporaryKeluarEl = document.getElementById('temporaryKeluar');
+        if (temporaryKeluarEl) temporaryKeluarEl.textContent = `${totalKeluarTemporary} unit`;
 
         const masukSnapshot = await getDocs(query(
             collection(db, 'users', user.uid, 'transaksi'),
             where('transaksi', '==', 'masuk')
         ));
         const totalMasuk = masukSnapshot.docs.reduce((sum, doc) => sum + (doc.data().jumlah || 0), 0);
-        document.getElementById('totalMasuk').textContent = `${totalMasuk} unit`;
+        const totalMasukEl = document.getElementById('totalMasuk');
+        if (totalMasukEl) totalMasukEl.textContent = `${totalMasuk} unit`;
 
         const keluarTransaksiSnapshot = await getDocs(query(
             collection(db, 'users', user.uid, 'transaksi'),
             where('transaksi', '==', 'keluar')
         ));
         const totalKeluar = keluarTransaksiSnapshot.docs.reduce((sum, doc) => sum + (doc.data().jumlah || 0), 0);
-        document.getElementById('totalKeluar').textContent = `${totalKeluar} unit`;
+        const totalKeluarEl = document.getElementById('totalKeluar');
+        if (totalKeluarEl) totalKeluarEl.textContent = `${totalKeluar} unit`;
     } catch (error) {
         console.error('Gagal memuat dashboard:', error.message);
-        alert('Gagal memuat dashboard: ' + error.message);
-        document.getElementById('totalMaterial').textContent = 'Error';
-        document.getElementById('totalMaterialJenis').textContent = 'Error';
-        document.getElementById('totalKomponen').textContent = 'Error';
-        document.getElementById('totalKomponenJenis').textContent = 'Error';
-        document.getElementById('recentTransaksi').textContent = 'Error';
-        document.getElementById('temporaryKeluar').textContent = 'Error';
-        document.getElementById('totalMasuk').textContent = 'Error';
-        document.getElementById('totalKeluar').textContent = 'Error';
+        const elements = [
+            'totalMaterial', 'totalMaterialJenis', 'totalKomponen', 'totalKomponenJenis',
+            'recentTransaksi', 'temporaryKeluar', 'totalMasuk', 'totalKeluar'
+        ];
+        elements.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = 'Error';
+        });
     }
 }
 
@@ -623,15 +651,21 @@ async function loadDataTablePage() {
 
     function renderLogs(data) {
         const logContainer = document.querySelector('#log-container ul');
+        const actionMap = {
+            'tambah': 'ditambahkan',
+            'edit': 'diubah',
+            'hapus': 'dihapus'
+        };
         logContainer.innerHTML = data.length === 0
             ? '<li class="list-group-item text-muted text-center">Belum ada aktivitas.</li>'
             : data.map(doc => {
                 const log = doc.data;
-                const details = log.details || {}; // Fallback to empty object
+                const details = log.details || {};
                 const docName = sanitizeText(details.nama || details.nama_barang || 'Item');
                 const itemDetails = ` (Merk: ${sanitizeText(details.merk || '-')}, Spek: ${sanitizeText(details.spesifikasi || '-')}, Jml: ${details.jumlah || 0}, Ket: ${sanitizeText(details.keterangan || '-')})`;
-                const date = log.timestamp?.toDate()?.toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }) || 'Baru saja';
-                return `<li class="list-group-item">[${sanitizeText(date)}] Item <strong>${docName}</strong> telah <strong>${sanitizeText(log.action)}</strong>.${itemDetails}</li>`;
+                const date = log.timestamp?.toDate()?.toLocaleString('id-ID', { timeStyle: 'short', dateStyle: 'medium' }) || 'Baru saja';
+                const actionText = actionMap[log.action] || log.action;
+                return `<li class="list-group-item">[${sanitizeText(date)}] Item <strong>${docName}</strong> telah <strong>${actionText}</strong>.${itemDetails}</li>`;
             }).join('');
     }
 
@@ -662,14 +696,14 @@ async function loadKeluarMasukPage() {
                 </div>
             </div>
             <div class="card-body">
-                <div class="table scrollable-container">
+                <div class="table-responsive scrollable-container">
                     <table class="table table-striped table-hover table-bordered">
                         <thead class="table-dark">
                             <tr>
                                 <th>NO</th>
                                 <th>Jenis</th>
                                 <th>Nama Barang</th>
-                                <th>Keluar/Tambah</th>
+                                <th>Keluar/Masuk</th>
                                 <th>Keterangan</th>
                                 <th>Merk</th>
                                 <th>Spesifikasi</th>
@@ -724,7 +758,7 @@ async function loadKeluarMasukPage() {
             ? `<tr><td colspan="10" class="text-center">Tidak ada data.</td></tr>`
             : data.map(item => {
                 const data = item.data;
-                const waktu = data.timestamp?.toDate()?.toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }) || '-';
+                const waktu = data.timestamp?.toDate()?.toLocaleString('id-ID', { timeStyle: 'short', dateStyle: 'medium' }) || '-';
                 return `
                     <tr>
                         <td>${item.index}</td>
@@ -759,7 +793,7 @@ async function loadBarangKeluarTemporaryPage() {
                 <input type="text" class="form-control log-search" id="search-keluar" placeholder="Cari...">
             </div>
             <div class="card-body">
-                <div class="table scrollable-container">
+                <div class="table-responsive scrollable-container">
                     <table class="table table-striped table-hover table-bordered">
                         <thead class="table-dark">
                             <tr>
@@ -788,12 +822,11 @@ async function loadBarangKeluarTemporaryPage() {
                     <input type="text" class="form-control d-inline-block log-search ms-2" id="log-search" placeholder="Cari...">
                 </div>
             </div>
-            <div class="card-body p-3 scrollable-container">
+            <div class="card-body p-3">
                 <div class="table-responsive scrollable-container">
                     <table class="table table-striped table-hover table-bordered" style="min-width: 1000px;">
                         <thead class="table-dark">
                             <tr>
-                                <th>Tanggal Dikembalikan</th>
                                 <th>Jenis</th>
                                 <th>Nama Barang</th>
                                 <th>Merk</th>
@@ -801,6 +834,7 @@ async function loadBarangKeluarTemporaryPage() {
                                 <th>Jumlah</th>
                                 <th>Tanggal Pinjam</th>
                                 <th>Tanggal Kembali</th>
+                                <th>Tanggal Dikembalikan</th>
                             </tr>
                         </thead>
                         <tbody id="log-table-body"></tbody>
@@ -823,12 +857,13 @@ async function loadBarangKeluarTemporaryPage() {
         tableData = snapshot.docs.map((doc, index) => {
             const data = doc.data();
             const isDueToday = data.tanggal_kembali === today;
-            console.log(`Item: ${data.nama_barang}, Tanggal Kembali: ${data.tanggal_kembali}, Today: ${today}, Is Due Today: ${isDueToday}`); // Debug log
+            const isOverdue = data.tanggal_kembali < today;
             return {
                 id: doc.id,
                 data,
                 index: index + 1,
-                isDueToday
+                isDueToday,
+                isOverdue
             };
         });
 
@@ -860,9 +895,13 @@ async function loadBarangKeluarTemporaryPage() {
                 const safeNama = sanitizeAttribute(data.nama_barang || '');
                 const safeMerk = sanitizeAttribute(data.merk || '');
                 const safeSpesifikasi = sanitizeAttribute(data.spesifikasi || '');
-                const rowStyle = item.isDueToday ? 'style="background-color: rgba(255, 255, 0, 0.2);"' : '';
+                // =========================================================================================
+                // ==== PERBAIKAN 2: Logika Highlight untuk Jatuh Tempo & Terlambat ========================
+                // =========================================================================================
+                // PERBAIKAN: Menambahkan kelas 'item-due' jika barang jatuh tempo hari ini ATAU sudah terlambat.
+                const rowClass = (item.isDueToday || item.isOverdue) ? 'class="item-due"' : '';
                 return `
-                    <tr ${rowStyle}>
+                    <tr ${rowClass}>
                         <td>${item.index}</td>
                         <td>${sanitizeText(data.jenis || '-')}</td>
                         <td>${sanitizeText(data.nama_barang || '-')}</td>
@@ -893,11 +932,19 @@ async function loadBarangKeluarTemporaryPage() {
     );
     const unsubscribeLogs = onSnapshot(logQuery, (snapshot) => {
         logData = snapshot.docs.map(doc => {
+            // =========================================================================================
+            // ==== PERBAIKAN 1: Kesalahan Pengambilan Data Riwayat ====================================
+            // =========================================================================================
+            // PERBAIKAN: Menggunakan `doc.data()` untuk mendapatkan objek data, bukan `doc.data`.
             const data = doc.data();
             const details = data.details || {};
-            const tanggalKembali = details.tanggal_kembali ? new Date(details.tanggal_kembali) : null;
-            const tanggalDikembalikan = details.tanggal_dikembalikan ? new Date(details.tanggal_dikembalikan) : null;
-            const isLate = tanggalKembali && tanggalDikembalikan && tanggalDikembalikan > tanggalKembali;
+            const tanggalKembaliStr = details.tanggal_kembali;
+            const tanggalDikembalikanStr = details.tanggal_dikembalikan;
+            let isLate = false;
+            if (tanggalKembaliStr && tanggalDikembalikanStr) {
+                const dikembalikanDateStr = tanggalDikembalikanStr.split('T')[0];
+                isLate = dikembalikanDateStr > tanggalKembaliStr;
+            }
             return { id: doc.id, data, isLate };
         });
         renderLogs(logData);
@@ -925,16 +972,15 @@ async function loadBarangKeluarTemporaryPage() {
             ? '<tr><td colspan="8" class="text-center">Belum ada aktivitas.</td></tr>'
             : data.map(doc => {
                 const log = doc.data;
-                const details = log.details || {}; // Fallback to empty object
+                const details = log.details || {};
                 const datePinjam = sanitizeText(details.tanggal_keluar || '-');
                 const dateKembali = sanitizeText(details.tanggal_kembali || '-');
                 const dateDikembalikan = details.tanggal_dikembalikan
-                    ? new Date(details.tanggal_dikembalikan).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })
+                    ? new Date(details.tanggal_dikembalikan).toLocaleString('id-ID', { timeStyle: 'short', dateStyle: 'medium' })
                     : '-';
-                const rowStyle = doc.isLate ? 'style="background-color: rgba(255, 0, 0, 0.2);"' : '';
+                const rowClass = doc.isLate ? 'class="late-return"' : '';
                 return `
-                    <tr ${rowStyle}>
-                        <td>${sanitizeText(dateDikembalikan)}</td>
+                    <tr ${rowClass}>
                         <td>${sanitizeText(details.jenis || '-')}</td>
                         <td>${sanitizeText(details.nama_barang || '-')}</td>
                         <td>${sanitizeText(details.merk || '-')}</td>
@@ -942,6 +988,7 @@ async function loadBarangKeluarTemporaryPage() {
                         <td>${details.jumlah || 0}</td>
                         <td>${datePinjam}</td>
                         <td>${dateKembali}</td>
+                        <td>${sanitizeText(dateDikembalikan)}</td>
                     </tr>`;
             }).join('');
     }
@@ -1020,40 +1067,96 @@ async function generateReport(startDate, endDate, includeLatestStock) {
     doc.setFontSize(12);
     doc.text(`Periode: ${startDate} s/d ${endDate}`, 20, 30);
 
-    let tableData = [];
+    let materialTableData = [];
+    let komponenTableData = [];
+    let returnLogs = [];
+
+    try {
+        const logSnapshot = await getDocs(query(
+            collection(db, 'users', user.uid, 'logs'),
+            where('action', '==', 'pengembalian'),
+            where('collection', '==', 'keluar'),
+            orderBy('timestamp', 'desc')
+        ));
+        returnLogs = logSnapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                nama_barang: data.details?.nama_barang || '-',
+                tanggal_dikembalikan: data.details?.tanggal_dikembalikan
+                    ? new Date(data.details.tanggal_dikembalikan).toLocaleString('id-ID', { dateStyle: 'medium' })
+                    : '-'
+            };
+        });
+    } catch (error) {
+        console.error('Gagal memuat log pengembalian:', error.message);
+    }
+
     try {
         const transaksiSnapshot = await getDocs(collection(db, 'users', user.uid, 'transaksi'));
-        tableData = transaksiSnapshot.docs
+        const allTransactions = transaksiSnapshot.docs
             .map(doc => doc.data())
             .filter(data => {
                 const tanggal = data.tanggal_keluar;
                 return (!startDate || tanggal >= startDate) && (!endDate || tanggal <= endDate) && data.keterangan !== 'pengembalian';
-            })
-            .map(data => [
-                sanitizeText(data.nama_barang || '-'),
-                sanitizeText(data.transaksi || '-'),
-                sanitizeText(data.keterangan || '-'),
-                sanitizeText(data.merk || '-'),
-                sanitizeText(data.spesifikasi || '-'),
-                data.jumlah || 0,
-                sanitizeText(data.tanggal_keluar || '-'),
-                sanitizeText(data.tanggal_kembali || '-'),
-                sanitizeText(data.user || '-')
-            ]);
+            });
+
+        materialTableData = allTransactions
+            .filter(data => data.jenis === 'material')
+            .map(data => {
+                const returnLog = returnLogs.find(log => log.nama_barang === data.nama_barang);
+                return [
+                    sanitizeText(data.nama_barang || '-'),
+                    sanitizeText(data.transaksi || '-'),
+                    sanitizeText(data.keterangan || '-'),
+                    sanitizeText(data.merk || '-'),
+                    sanitizeText(data.spesifikasi || '-'),
+                    data.jumlah || 0,
+                    sanitizeText(data.tanggal_keluar || '-'),
+                    sanitizeText(data.tanggal_kembali || '-'),
+                    sanitizeText(returnLog?.tanggal_dikembalikan || '-')
+                ];
+            });
+
+        komponenTableData = allTransactions
+            .filter(data => data.jenis === 'komponen')
+            .map(data => {
+                const returnLog = returnLogs.find(log => log.nama_barang === data.nama_barang);
+                return [
+                    sanitizeText(data.nama_barang || '-'),
+                    sanitizeText(data.transaksi || '-'),
+                    sanitizeText(data.keterangan || '-'),
+                    sanitizeText(data.merk || '-'),
+                    sanitizeText(data.spesifikasi || '-'),
+                    data.jumlah || 0,
+                    sanitizeText(data.tanggal_keluar || '-'),
+                    sanitizeText(data.tanggal_kembali || '-'),
+                    sanitizeText(returnLog?.tanggal_dikembalikan || '-')
+                ];
+            });
     } catch (error) {
         console.error('Gagal memuat transaksi:', error.message);
         alert('Gagal memuat transaksi: ' + error.message);
         return;
     }
 
+    doc.setFontSize(14);
+    doc.text('Transaksi Material', 20, 40);
     doc.autoTable({
-        head: [['Nama Barang', 'Keluar/Tambah', 'Keterangan', 'Merk', 'Spesifikasi', 'Jumlah', 'Tanggal', 'Tanggal Kembali', 'User']],
-        body: tableData,
-        startY: 40
+        head: [['Nama Barang', 'Keluar/Masuk', 'Keterangan', 'Merk', 'Spesifikasi', 'Jumlah', 'Tanggal', 'Tanggal Kembali', 'Tanggal Dikembalikan']],
+        body: materialTableData,
+        startY: 50
+    });
+
+    let finalY = doc.lastAutoTable.finalY || 50;
+    doc.text('Transaksi Komponen', 20, finalY + 20);
+    doc.autoTable({
+        head: [['Nama Barang', 'Keluar/Masuk', 'Keterangan', 'Merk', 'Spesifikasi', 'Jumlah', 'Tanggal', 'Tanggal Kembali', 'Tanggal Dikembalikan']],
+        body: komponenTableData,
+        startY: finalY + 30
     });
 
     if (includeLatestStock) {
-        let finalY = doc.lastAutoTable.finalY || 40;
+        finalY = doc.lastAutoTable.finalY || finalY + 30;
         doc.setFontSize(14);
         doc.text('Stok Material Terbaru', 20, finalY + 20);
 
@@ -1249,7 +1352,7 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
 
             formHtml += `
                 <h6 class="mb-3">Stok Material</h6>
-                <div class="table mb-4">
+                <div class="table-responsive mb-4">
                     <table class="table table-striped table-hover">
                         <thead class="table-dark">
                             <tr>
@@ -1266,7 +1369,7 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
                     </table>
                 </div>
                 <h6 class="mb-3">Stok Komponen</h6>
-                <div class="table">
+                <div class="table-responsive">
                     <table class="table table-striped table-hover">
                         <thead class="table-dark">
                             <tr>
@@ -1287,10 +1390,16 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
 
             const modalDialog = document.querySelector('#itemModal .modal-dialog');
             const modalFooter = document.querySelector('#itemModal .modal-footer');
-            modalDialog.classList.add('modal-lg');
+            modalDialog.classList.add('modal-xl');
             modalFooter.style.display = 'none';
 
-            document.addEventListener('click', function handlePilihClick(e) {
+            itemModal._element.addEventListener('hidden.bs.modal', () => {
+                 modalDialog.classList.remove('modal-xl');
+                 modalFooter.style.display = '';
+            }, { once: true });
+
+
+            document.querySelector('#itemModal .modal-body').addEventListener('click', function handlePilihClick(e) {
                 const button = e.target.closest('.btn-pilih');
                 if (button) {
                     const selectedData = {
@@ -1300,9 +1409,8 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
                         spesifikasi: button.dataset.spesifikasi
                     };
                     buildForm(selectedData, 'transaksi', 'details');
-                    modalDialog.classList.remove('modal-lg');
+                    modalDialog.classList.remove('modal-xl');
                     modalFooter.style.display = '';
-                    document.removeEventListener('click', handlePilihClick);
                 }
             });
         } else if (stage === 'details') {
@@ -1328,10 +1436,10 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
                     <input type="number" class="form-control" id="jumlah" value="${data.jumlah || ''}" required min="1">
                 </div>
                 <div class="mb-3">
-                    <label class="form-label">Keluar/Tambah</label>
+                    <label class="form-label">Keluar/Masuk</label>
                     <select class="form-select" id="transaksi" required>
                         <option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
-                        <option value="masuk">Tambah</option>
+                        <option value="masuk">Masuk</option>
                         <option value="keluar">Keluar</option>
                     </select>
                 </div>
@@ -1398,11 +1506,11 @@ async function writeLog(action, collectionName, data) {
 function sanitizeAttribute(value) {
     if (value == null) return '';
     return String(value)
-        .replace(/&/g, '&')
-        .replace(/"/g, '"')
-        .replace(/'/g, '')
-        .replace(/</g, '<')
-        .replace(/>/g, '>');
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 }
 
 function sanitizeText(value) {
