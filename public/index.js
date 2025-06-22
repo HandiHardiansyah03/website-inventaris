@@ -796,7 +796,7 @@ async function loadBarangKeluarTemporaryPage() {
                 <input type="text" class="form-control log-search" id="search-keluar" placeholder="Cari...">
             </div>
             <div class="card-body">
-                <div class="table-responsive scrollable-container">
+                <div class="table scrollable-container">
                     <table class="table table-striped table-hover table-bordered">
                         <thead class="table-dark">
                             <tr>
@@ -826,7 +826,7 @@ async function loadBarangKeluarTemporaryPage() {
                 </div>
             </div>
             <div class="card-body p-3">
-                <div class="table-responsive scrollable-container">
+                <div class="table scrollable-container">
                     <table class="table table-striped table-hover table-bordered" style="min-width: 1000px;">
                         <thead class="table-dark">
                             <tr>
