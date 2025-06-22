@@ -237,7 +237,7 @@ function initializeAppLogic() {
                 const jumlah = parseInt(document.getElementById('jumlah').value);
                 const transaksi = document.getElementById('transaksi').value;
                 const keterangan = document.getElementById('keterangan').value;
-                const tanggal_keluar = document.getElementById('tanggal_keluar')?.value || new Date().toISOString().split('T')[0];
+                const tanggal_keluar = new Date().toISOString().split('T')[0];
                 const tanggal_kembali = document.getElementById('tanggal_kembali')?.value || '';
 
                 itemData = {
@@ -273,7 +273,10 @@ function initializeAppLogic() {
                 if (transaksi === 'masuk') {
                     newJumlah += jumlah;
                 } else if (transaksi === 'keluar') {
-                    newJumlah = Math.max(0, newJumlah - jumlah);
+                    if (jumlah > newJumlah) {
+                         throw new Error('Jumlah keluar melebihi stok yang tersedia.');
+                    }
+                    newJumlah -= jumlah;
                 }
 
                 await updateDoc(doc(db, 'users', user.uid, jenis, stockId), { jumlah: newJumlah });
@@ -696,7 +699,7 @@ async function loadKeluarMasukPage() {
                 </div>
             </div>
             <div class="card-body">
-                <div class="table-responsive scrollable-container">
+                <div class="table scrollable-container-lg">
                     <table class="table table-striped table-hover table-bordered">
                         <thead class="table-dark">
                             <tr>
@@ -856,14 +859,12 @@ async function loadBarangKeluarTemporaryPage() {
         const today = new Date().toISOString().split('T')[0];
         tableData = snapshot.docs.map((doc, index) => {
             const data = doc.data();
-            const isDueToday = data.tanggal_kembali === today;
-            const isOverdue = data.tanggal_kembali < today;
+            const isDue = data.tanggal_kembali && data.tanggal_kembali <= today;
             return {
                 id: doc.id,
                 data,
                 index: index + 1,
-                isDueToday,
-                isOverdue
+                isDue 
             };
         });
 
@@ -895,11 +896,8 @@ async function loadBarangKeluarTemporaryPage() {
                 const safeNama = sanitizeAttribute(data.nama_barang || '');
                 const safeMerk = sanitizeAttribute(data.merk || '');
                 const safeSpesifikasi = sanitizeAttribute(data.spesifikasi || '');
-                // =========================================================================================
-                // ==== PERBAIKAN 2: Logika Highlight untuk Jatuh Tempo & Terlambat ========================
-                // =========================================================================================
-                // PERBAIKAN: Menambahkan kelas 'item-due' jika barang jatuh tempo hari ini ATAU sudah terlambat.
-                const rowClass = (item.isDueToday || item.isOverdue) ? 'class="item-due"' : '';
+                const rowClass = item.isDue ? 'class="item-due"' : '';
+                
                 return `
                     <tr ${rowClass}>
                         <td>${item.index}</td>
@@ -932,17 +930,16 @@ async function loadBarangKeluarTemporaryPage() {
     );
     const unsubscribeLogs = onSnapshot(logQuery, (snapshot) => {
         logData = snapshot.docs.map(doc => {
-            // =========================================================================================
-            // ==== PERBAIKAN 1: Kesalahan Pengambilan Data Riwayat ====================================
-            // =========================================================================================
-            // PERBAIKAN: Menggunakan `doc.data()` untuk mendapatkan objek data, bukan `doc.data`.
-            const data = doc.data();
+            // PERBAIKAN: Mengganti doc.data menjadi doc.data() untuk membaca data dengan benar.
+            // Ini adalah penyebab utama kenapa tabel riwayat kosong dan highlight merah tidak berfungsi.
+            const data = doc.data(); 
             const details = data.details || {};
             const tanggalKembaliStr = details.tanggal_kembali;
-            const tanggalDikembalikanStr = details.tanggal_dikembalikan;
+            const tanggalDikembalikanISO = details.tanggal_dikembalikan;
+            
             let isLate = false;
-            if (tanggalKembaliStr && tanggalDikembalikanStr) {
-                const dikembalikanDateStr = tanggalDikembalikanStr.split('T')[0];
+            if (tanggalKembaliStr && tanggalDikembalikanISO) {
+                const dikembalikanDateStr = tanggalDikembalikanISO.split('T')[0];
                 isLate = dikembalikanDateStr > tanggalKembaliStr;
             }
             return { id: doc.id, data, isLate };
@@ -1062,10 +1059,20 @@ async function loadBuatReportPage() {
 
 async function generateReport(startDate, endDate, includeLatestStock) {
     const doc = new jsPDF();
-    doc.setFontSize(16);
-    doc.text('Laporan Transaksi Stok', 20, 20);
-    doc.setFontSize(12);
-    doc.text(`Periode: ${startDate} s/d ${endDate}`, 20, 30);
+    let yPos = 20;
+
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Laporan Inventaris PT MULIAMAKMUR ELEKTRIKATAMA', 105, yPos, { align: 'center' });
+    yPos += 8;
+
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Periode Laporan: ${startDate} s/d ${endDate}`, 105, yPos, { align: 'center' });
+    yPos += 5;
+    doc.text(`Dibuat oleh: ${user.displayName || user.email}`, 105, yPos, { align: 'center' });
+    yPos += 10; 
+
 
     let materialTableData = [];
     let komponenTableData = [];
@@ -1139,26 +1146,45 @@ async function generateReport(startDate, endDate, includeLatestStock) {
         return;
     }
 
-    doc.setFontSize(14);
-    doc.text('Transaksi Material', 20, 40);
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Transaksi Material', 14, yPos);
+    yPos += 5; 
     doc.autoTable({
-        head: [['Nama Barang', 'Keluar/Masuk', 'Keterangan', 'Merk', 'Spesifikasi', 'Jumlah', 'Tanggal', 'Tanggal Kembali', 'Tanggal Dikembalikan']],
+        head: [['Nama Barang', 'Keluar/Masuk', 'Keterangan', 'Merk', 'Spesifikasi', 'Jumlah', 'Tanggal', 'Tgl Kembali', 'Tgl Dikembalikan']],
         body: materialTableData,
-        startY: 50
+        startY: yPos,
+        theme: 'grid',
+        headStyles: { fillColor: [41, 128, 185], textColor: 255, fontStyle: 'bold' },
+        styles: { fontSize: 8 },
+        columnStyles: { 8: { cellWidth: 25 } }
     });
 
-    let finalY = doc.lastAutoTable.finalY || 50;
-    doc.text('Transaksi Komponen', 20, finalY + 20);
+    yPos = doc.lastAutoTable.finalY;
+    
+    yPos += 10; 
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Transaksi Komponen', 14, yPos);
+    yPos += 5;
     doc.autoTable({
-        head: [['Nama Barang', 'Keluar/Masuk', 'Keterangan', 'Merk', 'Spesifikasi', 'Jumlah', 'Tanggal', 'Tanggal Kembali', 'Tanggal Dikembalikan']],
+        head: [['Nama Barang', 'Keluar/Masuk', 'Keterangan', 'Merk', 'Spesifikasi', 'Jumlah', 'Tanggal', 'Tgl Kembali', 'Tgl Dikembalikan']],
         body: komponenTableData,
-        startY: finalY + 30
+        startY: yPos,
+        theme: 'grid',
+        headStyles: { fillColor: [41, 128, 185], textColor: 255, fontStyle: 'bold' },
+        styles: { fontSize: 8 },
+        columnStyles: { 8: { cellWidth: 25 } }
     });
 
     if (includeLatestStock) {
-        finalY = doc.lastAutoTable.finalY || finalY + 30;
-        doc.setFontSize(14);
-        doc.text('Stok Material Terbaru', 20, finalY + 20);
+        yPos = doc.lastAutoTable.finalY;
+        
+        yPos += 10;
+        doc.setFontSize(11);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Stok Material Terbaru', 14, yPos);
+        yPos += 5;
 
         let materialData = [];
         try {
@@ -1175,17 +1201,24 @@ async function generateReport(startDate, endDate, includeLatestStock) {
             });
         } catch (error) {
             console.error('Gagal memuat material:', error.message);
-            alert('Gagal memuat material: ' + error.message);
         }
 
         doc.autoTable({
             head: [['Nama', 'Merk', 'Spesifikasi', 'Jumlah', 'Keterangan']],
             body: materialData,
-            startY: finalY + 30
+            startY: yPos,
+            theme: 'grid',
+            headStyles: { fillColor: [22, 160, 133], textColor: 255, fontStyle: 'bold' },
+            styles: { fontSize: 8 }
         });
 
-        finalY = doc.lastAutoTable.finalY;
-        doc.text('Stok Komponen Terbaru', 20, finalY + 20);
+        yPos = doc.lastAutoTable.finalY;
+
+        yPos += 10;
+        doc.setFontSize(11);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Stok Komponen Terbaru', 14, yPos);
+        yPos += 5;
 
         let komponenData = [];
         try {
@@ -1202,13 +1235,15 @@ async function generateReport(startDate, endDate, includeLatestStock) {
             });
         } catch (error) {
             console.error('Gagal memuat komponen:', error.message);
-            alert('Gagal memuat komponen: ' + error.message);
         }
 
         doc.autoTable({
             head: [['Nama Barang', 'Merk', 'Spesifikasi', 'Jumlah', 'Keterangan']],
             body: komponenData,
-            startY: finalY + 30
+            startY: yPos,
+            theme: 'grid',
+            headStyles: { fillColor: [22, 160, 133], textColor: 255, fontStyle: 'bold' },
+            styles: { fontSize: 8 }
         });
     }
 
@@ -1223,33 +1258,11 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
         formHtml += `
             <div class="mb-3">
                 <label class="form-label">Nama Komponen</label>
-                <select class="form-select" id="nama_barang" required>
-                    <option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
-                    <option ${data.nama_barang === 'MCB' ? 'selected' : ''}>MCB</option>
-                    <option ${data.nama_barang === 'MCCB' ? 'selected' : ''}>MCCB</option>
-                    <option ${data.nama_barang === 'Relay' ? 'selected' : ''}>Relay</option>
-                    <option ${data.nama_barang === 'Kontaktor' ? 'selected' : ''}>Kontaktor</option>
-                    <option ${data.nama_barang === 'Thermal' ? 'selected' : ''}>Thermal</option>
-                    <option ${data.nama_barang === 'Timer' ? 'selected' : ''}>Timer</option>
-                    <option ${data.nama_barang === 'Push Button' ? 'selected' : ''}>Push Button</option>
-                    <option ${data.nama_barang === 'Pilot Lamp' ? 'selected' : ''}>Pilot Lamp</option>
-                </select>
+                <input type="text" class="form-control" id="nama_barang" value="${sanitizeText(data.nama_barang || '')}" required>
             </div>
             <div class="mb-3">
                 <label class="form-label">Merk</label>
-                <select class="form-select" id="merk" required>
-                    <option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
-                    <option ${data.merk === 'Autonics' ? 'selected' : ''}>Autonics</option>
-                    <option ${data.merk === 'Omron' ? 'selected' : ''}>Omron</option>
-                    <option ${data.merk === 'Fuji Elektrik' ? 'selected' : ''}>Fuji Elektrik</option>
-                    <option ${data.merk === 'GAE' ? 'selected' : ''}>GAE</option>
-                    <option ${data.merk === 'ABB' ? 'selected' : ''}>ABB</option>
-                    <option ${data.merk === 'LS' ? 'selected' : ''}>LS</option>
-                    <option ${data.merk === 'Schneider' ? 'selected' : ''}>Schneider</option>
-                    <option ${data.merk === 'Terasaki' ? 'selected' : ''}>Terasaki</option>
-                    <option ${data.merk === 'Mitsubishi' ? 'selected' : ''}>Mitsubishi</option>
-                    <option ${data.merk === 'IDEC' ? 'selected' : ''}>IDEC</option>
-                </select>
+                <input type="text" class="form-control" id="merk" value="${sanitizeText(data.merk || '')}" required>
             </div>
             <div class="mb-3">
                 <label class="form-label">Spesifikasi</label>
@@ -1261,13 +1274,7 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
             </div>
             <div class="mb-3">
                 <label class="form-label">Keterangan</label>
-                <select class="form-select" id="keterangan" required>
-                    <option disabled ${!isEdit && 'selected'} value="">Pilih...</option>
-                    <option ${data.keterangan === 'Stock MME JKT' ? 'selected' : ''}>Stock MME JKT</option>
-                    <option ${data.keterangan === 'Stock MME SBY' ? 'selected' : ''}>Stock MME SBY</option>
-                    <option ${data.keterangan === 'MME JKT' ? 'selected' : ''}>MME JKT</option>
-                    <option ${data.keterangan === 'MME SBY' ? 'selected' : ''}>MME SBY</option>
-                </select>
+                <input type="text" class="form-control" id="keterangan" value="${sanitizeText(data.keterangan || '')}" required>
             </div>`;
         document.getElementById('itemModalLabel').textContent = isEdit ? 'Edit Stock Komponen' : 'Tambah Stock Komponen';
         itemForm.innerHTML = formHtml;
@@ -1297,21 +1304,79 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
         itemForm.innerHTML = formHtml;
     } else if (coll === 'transaksi') {
         if (stage === 'select') {
-            let materialTableBody = '';
-            let komponenTableBody = '';
+            let materialStock = [];
+            let komponenStock = [];
+
             try {
                 const materialSnapshot = await getDocs(collection(db, 'users', user.uid, 'material'));
-                materialTableBody = materialSnapshot.docs.map(doc => {
-                    const data = doc.data();
-                    const safeNama = sanitizeAttribute(data.nama || '');
-                    const safeMerk = sanitizeAttribute(data.merk || '');
-                    const safeSpesifikasi = sanitizeAttribute(data.spesifikasi || '');
+                materialStock = materialSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+                const komponenSnapshot = await getDocs(collection(db, 'users', user.uid, 'komponen'));
+                komponenStock = komponenSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            } catch (error) {
+                console.error('Gagal memuat stok:', error.message);
+                itemForm.innerHTML = `<p class="text-danger">Gagal memuat stok: ${error.message}</p>`;
+                return;
+            }
+
+            formHtml = `
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="mb-0">Stok Material</h6>
+                    <input type="text" class="form-control w-auto" id="search-material-stock" placeholder="Cari material...">
+                </div>
+                <div class="table mb-4" style="max-height: 200px; overflow-y: auto;">
+                    <table class="table table-striped table-hover table-sm">
+                        <thead class="table-dark sticky-top">
+                            <tr>
+                                <th>Nama Material</th>
+                                <th>Merk</th>
+                                <th>Spesifikasi</th>
+                                <th>Jumlah</th>
+                                <th>Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody id="material-stock-body"></tbody>
+                    </table>
+                </div>
+
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="mb-0">Stok Komponen</h6>
+                    <input type="text" class="form-control w-auto" id="search-komponen-stock" placeholder="Cari komponen...">
+                </div>
+                <div class="table" style="max-height: 200px; overflow-y: auto;">
+                    <table class="table table-striped table-hover table-sm">
+                        <thead class="table-dark sticky-top">
+                            <tr>
+                                <th>Nama Komponen</th>
+                                <th>Merk</th>
+                                <th>Spesifikasi</th>
+                                <th>Jumlah</th>
+                                <th>Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody id="komponen-stock-body"></tbody>
+                    </table>
+                </div>`;
+
+            document.getElementById('itemModalLabel').textContent = 'Pilih Stock Barang';
+            itemForm.innerHTML = formHtml;
+
+            const materialTbody = document.getElementById('material-stock-body');
+            const komponenTbody = document.getElementById('komponen-stock-body');
+
+            function renderMaterialStock(data) {
+                materialTbody.innerHTML = data.length === 0 
+                ? '<tr><td colspan="5" class="text-center">Tidak ada data.</td></tr>'
+                : data.map(item => {
+                    const safeNama = sanitizeAttribute(item.nama || '');
+                    const safeMerk = sanitizeAttribute(item.merk || '');
+                    const safeSpesifikasi = sanitizeAttribute(item.spesifikasi || '');
                     return `
                         <tr>
-                            <td>${sanitizeText(data.nama || '-')}</td>
-                            <td>${sanitizeText(data.merk || '-')}</td>
-                            <td>${sanitizeText(data.spesifikasi || '-')}</td>
-                            <td>${data.jumlah || 0}</td>
+                            <td>${sanitizeText(item.nama || '-')}</td>
+                            <td>${sanitizeText(item.merk || '-')}</td>
+                            <td>${sanitizeText(item.spesifikasi || '-')}</td>
+                            <td>${item.jumlah || 0}</td>
                             <td>
                                 <button class="btn btn-primary btn-sm btn-pilih"
                                         data-collection="material"
@@ -1321,19 +1386,21 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
                             </td>
                         </tr>`;
                 }).join('');
+            }
 
-                const komponenSnapshot = await getDocs(collection(db, 'users', user.uid, 'komponen'));
-                komponenTableBody = komponenSnapshot.docs.map(doc => {
-                    const data = doc.data();
-                    const safeNama = sanitizeAttribute(data.nama_barang || '');
-                    const safeMerk = sanitizeAttribute(data.merk || '');
-                    const safeSpesifikasi = sanitizeAttribute(data.spesifikasi || '');
+            function renderKomponenStock(data) {
+                 komponenTbody.innerHTML = data.length === 0 
+                ? '<tr><td colspan="5" class="text-center">Tidak ada data.</td></tr>'
+                : data.map(item => {
+                    const safeNama = sanitizeAttribute(item.nama_barang || '');
+                    const safeMerk = sanitizeAttribute(item.merk || '');
+                    const safeSpesifikasi = sanitizeAttribute(item.spesifikasi || '');
                     return `
                         <tr>
-                            <td>${sanitizeText(data.nama_barang || '-')}</td>
-                            <td>${sanitizeText(data.merk || '-')}</td>
-                            <td>${sanitizeText(data.spesifikasi || '-')}</td>
-                            <td>${data.jumlah || 0}</td>
+                            <td>${sanitizeText(item.nama_barang || '-')}</td>
+                            <td>${sanitizeText(item.merk || '-')}</td>
+                            <td>${sanitizeText(item.spesifikasi || '-')}</td>
+                            <td>${item.jumlah || 0}</td>
                             <td>
                                 <button class="btn btn-primary btn-sm btn-pilih"
                                         data-collection="komponen"
@@ -1343,58 +1410,39 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
                             </td>
                         </tr>`;
                 }).join('');
-            } catch (error) {
-                console.error('Gagal memuat stok:', error.message);
-                formHtml = `<p class="text-danger">Gagal memuat stok: ${error.message}</p>`;
-                itemForm.innerHTML = formHtml;
-                return;
             }
 
-            formHtml += `
-                <h6 class="mb-3">Stok Material</h6>
-                <div class="table-responsive mb-4">
-                    <table class="table table-striped table-hover">
-                        <thead class="table-dark">
-                            <tr>
-                                <th>Nama Material</th>
-                                <th>Merk</th>
-                                <th>Spesifikasi</th>
-                                <th>Jumlah</th>
-                                <th>Aksi</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${materialTableBody || '<tr><td colspan="5" class="text-center">Tidak ada data.</td></tr>'}
-                        </tbody>
-                    </table>
-                </div>
-                <h6 class="mb-3">Stok Komponen</h6>
-                <div class="table-responsive">
-                    <table class="table table-striped table-hover">
-                        <thead class="table-dark">
-                            <tr>
-                                <th>Nama Komponen</th>
-                                <th>Merk</th>
-                                <th>Spesifikasi</th>
-                                <th>Jumlah</th>
-                                <th>Aksi</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${komponenTableBody || '<tr><td colspan="5" class="text-center">Tidak ada data.</td></tr>'}
-                        </tbody>
-                    </table>
-                </div>`;
-            document.getElementById('itemModalLabel').textContent = 'Pilih Stock Barang';
-            itemForm.innerHTML = formHtml;
+            renderMaterialStock(materialStock);
+            renderKomponenStock(komponenStock);
+            
+            document.getElementById('search-material-stock').addEventListener('input', (e) => {
+                const searchTerm = e.target.value.toLowerCase();
+                const filtered = materialStock.filter(item => 
+                    (item.nama || '').toLowerCase().includes(searchTerm) ||
+                    (item.merk || '').toLowerCase().includes(searchTerm) ||
+                    (item.spesifikasi || '').toLowerCase().includes(searchTerm)
+                );
+                renderMaterialStock(filtered);
+            });
+            
+            document.getElementById('search-komponen-stock').addEventListener('input', (e) => {
+                const searchTerm = e.target.value.toLowerCase();
+                const filtered = komponenStock.filter(item => 
+                    (item.nama_barang || '').toLowerCase().includes(searchTerm) ||
+                    (item.merk || '').toLowerCase().includes(searchTerm) ||
+                    (item.spesifikasi || '').toLowerCase().includes(searchTerm)
+                );
+                renderKomponenStock(filtered);
+            });
+
 
             const modalDialog = document.querySelector('#itemModal .modal-dialog');
             const modalFooter = document.querySelector('#itemModal .modal-footer');
-            modalDialog.classList.add('modal-xl');
+            modalDialog.classList.add('modal-lg');
             modalFooter.style.display = 'none';
 
             itemModal._element.addEventListener('hidden.bs.modal', () => {
-                 modalDialog.classList.remove('modal-xl');
+                 modalDialog.classList.remove('modal-lg');
                  modalFooter.style.display = '';
             }, { once: true });
 
@@ -1409,7 +1457,7 @@ async function buildForm(data = {}, coll = currentCollectionName, stage = undefi
                         spesifikasi: button.dataset.spesifikasi
                     };
                     buildForm(selectedData, 'transaksi', 'details');
-                    modalDialog.classList.remove('modal-xl');
+                    modalDialog.classList.remove('modal-lg');
                     modalFooter.style.display = '';
                 }
             });
